@@ -11,7 +11,8 @@
               are still fully available).
     ledger -- this item's entry from data/blyg/ledger.json (as written by
               scripts/blyg_stamp.py): {path, created, version, kind,
-              last_hash, withdrawn, changelog}.
+              last_hash, withdrawn, changelog, transclusions?} -- the
+              last only on a thread with directives, see below.
     base   -- the site's base URL, with or without a trailing slash.
 
   `kind` comes from the ledger, never straight from front matter: a
@@ -22,9 +23,9 @@
   SHA-256 must match the ledger's `last_hash` -- so an unstamped edit can
   never ship as a same-version stealth edit (§13.3). "withdrawn" is a
   protocol state derived from the ledger, never an authored kind.
-  Threads always carry transclusions (currently always [] --
-  scripts/blyg_stamp.py refuses any `![[id]]` directive until
-  resolution is built); fragments omit the key entirely (§10.3).
+  Threads always carry transclusions, in directive order; fragments omit
+  the key entirely (§10.3). See the transclusion block below for how
+  their snapshots are baked.
 */ -}}
 {{- $page := .page -}}
 {{- $entry := .ledger -}}
@@ -67,6 +68,76 @@
     to); scripts/blyg_validate.py fails the build on any that remain.
   */ -}}
   {{- $html := printf "%s" $page.Content -}}
+
+  {{- /*
+    Transclusion (§10.2). scripts/blyg_stamp.py resolves each `![[id]]`
+    directive when the thread's version is created and stores, in this
+    thread's ledger entry, the directive's line, the fragment version it
+    resolved to, and that version's content_md. Baking from that stored
+    snapshot -- never from the fragment's current page -- is what keeps
+    later edits, withdrawal or pinning of the fragment from changing an
+    already-published thread (§10.4).
+
+    Each directive line becomes a placeholder paragraph (blank lines
+    around it, indentation kept, so it's a block of its own even inside
+    a list item), the body is rendered, and each placeholder is swapped
+    for the snapshot rendered in the fragment's own page context -- the
+    same rendering that produced the fragment's content_html, which
+    scripts/blyg_validate.py checks byte for byte while the fragment
+    still sits at the baked version. The placeholder is letters and
+    digits only (nothing goldmark or the typographer will touch) and
+    salted with this body's hash, so authored text can't collide with it.
+  */ -}}
+  {{- $snapshots := $entry.transclusions | default slice -}}
+  {{- if $snapshots -}}
+    {{- $lines := split $contentMD "\n" -}}
+    {{- $salt := substr (strings.TrimPrefix "sha256:" $entry.last_hash) 0 16 -}}
+    {{- $bakes := slice -}}
+    {{- range $i, $s := $snapshots -}}
+      {{- $n := int $s.line -}}
+      {{- if or (lt $n 1) (gt $n (len $lines)) -}}
+        {{- errorf "blyg: %s: the ledger's transclusion of %s names body line %d, which doesn't exist -- rerun scripts/blyg_stamp.py" $file $s.id $n -}}
+      {{- end -}}
+      {{- $line := index $lines (sub $n 1) -}}
+      {{- if ne (trim $line " \t\r") (printf "![[%s]]" $s.id) -}}
+        {{- errorf "blyg: %s body line %d is %q, but the ledger bakes ![[%s]] there -- rerun scripts/blyg_stamp.py" $file $n $line $s.id -}}
+      {{- end -}}
+      {{- if ne (printf "sha256:%s" (crypto.SHA256 $s.content_md)) $s.content_hash -}}
+        {{- errorf "blyg: %s: the ledger's snapshot of %s v%v doesn't match its content_hash -- a baked snapshot MUST NOT change without a new thread version (§10.4)" $file $s.id $s.version -}}
+      {{- end -}}
+      {{- $source := false -}}
+      {{- range first 1 (where site.RegularPages "Params.blyg_id" $s.id) -}}{{- $source = . -}}{{- end -}}
+      {{- if not $source -}}
+        {{- errorf "blyg: %s transcludes %s, which has no page on this site" $file $s.id -}}
+      {{- end -}}
+      {{- $token := printf "blygtransclusion%sn%d" $salt $i -}}
+      {{- $indent := index (findRE `^[ \t]*` $line 1) 0 | default "" -}}
+      {{- $bakes = $bakes | append (dict
+          "token" $token "line" $n "indent" $indent
+          "html" (printf `<blockquote class="blyg-transclusion" data-blyg-id="%s" data-blyg-version="%d">%s</blockquote>`
+                   $s.id (int $s.version) ($source.RenderString (dict "display" "block") $s.content_md))
+      ) -}}
+    {{- end -}}
+    {{- $out := slice -}}
+    {{- range $i, $line := $lines -}}
+      {{- $replaced := false -}}
+      {{- range $bakes -}}
+        {{- if eq .line (add $i 1) -}}
+          {{- $out = $out | append "" (printf "%s%s" .indent .token) "" -}}
+          {{- $replaced = true -}}
+        {{- end -}}
+      {{- end -}}
+      {{- if not $replaced -}}{{- $out = $out | append $line -}}{{- end -}}
+    {{- end -}}
+    {{- $html = printf "%s" ($page.RenderString (dict "display" "block") (delimit $out "\n")) -}}
+    {{- range $bakes -}}
+      {{- $para := printf "<p>%s</p>" .token -}}
+      {{- if ne (len (findRE $para $html)) 1 -}}
+        {{- errorf "blyg: %s: the transclusion directive on body line %d didn't render as a paragraph of its own (inside an indented code block or raw HTML?), so there's nowhere to bake it" $file .line -}}
+      {{- end -}}
+      {{- $html = replace $html $para .html -}}
+    {{- end -}}
+  {{- end -}}
   {{- $html = replaceRE `(\s(?:src|href|poster|cite|action|formaction|data|background|longdesc))=(["'])/([^/"'])` (printf "${1}=${2}%s/${3}" $base) $html -}}
   {{- $html = replaceRE `url\((["']?)/([^/"')])` (printf "url(${1}%s/${2}" $base) $html -}}
   {{- range findRESubmatch `\ssrcset=(["'])([^"']*)["']` $html -}}
@@ -152,7 +223,14 @@
   "changelog" $changelog
 -}}
 {{- if eq $entry.kind "thread" -}}
-  {{- $doc = merge $doc (dict "transclusions" (slice)) -}}
+  {{- /* §10.3: {id, version} in directive order; [] for an endcap. */ -}}
+  {{- $provenance := slice -}}
+  {{- if not $withdrawn -}}
+    {{- range $entry.transclusions -}}
+      {{- $provenance = $provenance | append (dict "id" .id "version" (int .version)) -}}
+    {{- end -}}
+  {{- end -}}
+  {{- $doc = merge $doc (dict "transclusions" $provenance) -}}
 {{- end -}}
 
 {{- return $doc -}}

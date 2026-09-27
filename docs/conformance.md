@@ -16,11 +16,12 @@ three in every workflow that builds, above all the one that actually ships
 (this repository's own CI runs them against `exampleSite/`):
 
 1. `scripts/blyg_stamp.py --check`, before the build: every source-side
-   rule (ids, versions, kinds, directives, what may stop being buildable,
-   media immutability).
+   rule (ids, versions, kinds, directives and their resolution, what may
+   stop being buildable, media immutability).
 2. The `hugo-blyg` templates fail the build on a ledger/content mismatch
    (unstamped body edit, unstamped kind change, ledger entry with no page,
-   page id with no ledger entry).
+   page id with no ledger entry, a transclusion snapshot that doesn't
+   match its directive line or its hash).
 3. `scripts/blyg_validate.py`, after the build: the built `public/blyg/`
    checked against this list and against the ledger — above all the
    rendered `content_html`, which only exists after Hugo runs.
@@ -28,11 +29,10 @@ three in every workflow that builds, above all the one that actually ships
 Scope: this module publishes at Level 1 only, as a single-author,
 non-multiplayer origin. Every item authors its `kind` via
 `blyg_kind` in front matter (`"fragment"` or `"thread"`; defaults to
-`"thread"`), and every thread currently carries `"transclusions": []`
-(§10) — there is no local fragment corpus yet for a thread to actually
-transclude. Real transclusion, the blogroll (§11), and generation
-provenance (§5.7) are not exercised yet, so their rules are listed for
-completeness but not all are load-bearing today.
+`"thread"`), and threads resolve `![[id]]` directives against the
+site's own fragments at publish time (§10). The blogroll (§11) and
+generation provenance (§5.7) are not exercised yet, so their rules are
+listed for completeness but not all are load-bearing today.
 
 ## §4 — The publication surface
 
@@ -99,9 +99,9 @@ completeness but not all are load-bearing today.
 - [ ] (SHOULD) Fragments capped at 2,000 characters of `content_md`
       (§5.3): `blyg_stamp.py` warns past it but still publishes — the cap
       is a publisher-side SHOULD, not a wire rule.
-- [ ] Threads carry `transclusions` (§10.3, currently always `[]` — no
-      local fragment corpus yet to transclude); fragments omit the key
-      entirely. Implemented as two different dict shapes, not a
+- [ ] Threads carry `transclusions` (§10.3: `{id, version}` in directive
+      order, from the ledger's publish-time snapshots); fragments omit
+      the key entirely. Implemented as two different dict shapes, not a
       placeholder value, since an empty array on a fragment would itself
       be a spec violation.
 - [ ] `media` entries: a media URL MUST always serve the same bytes once
@@ -247,38 +247,51 @@ completeness but not all are load-bearing today.
 
 ## §10 — Threads and transclusion
 
-*(Resolving `![[id]]` directives at publish time isn't built, so every
-thread emits `"transclusions": []` — and because the grammar is a
-**permanent protocol surface** and every directive MUST resolve,
-`blyg_stamp.py` refuses to publish any body containing a directive line
-(outside fenced code, where it is inert text), and refuses the reserved
-`![[id@vN]]` form outright. `blyg_validate.py` re-checks built
-`content_md` for both. Resolution needs publish-time snapshots stored in
-the ledger — re-resolving on every Hugo build would change a thread's
-`content_html` without a version bump, breaking §10.4.)*
+*(Resolution happens in `blyg_stamp.py` whenever a thread version is
+created — never at build time, which would change a thread's
+`content_html` without a version bump whenever a source fragment changed,
+breaking §10.4. The stamp script stores each directive's line, resolved
+version, and that version's `content_md` in the thread's ledger entry;
+`item.html` renders the stored Markdown in the fragment's own page
+context, which reproduces the fragment's `content_html` byte for byte
+(verified against Hugo 0.151.0, shortcodes and footnotes included, and
+re-checked by `blyg_validate.py` wherever that version's HTML is still
+served). The trade-off: like every item's own `content_html`, a baked
+snapshot's HTML is re-rendered on each build, so a Hugo upgrade or
+markup-config change can change its bytes, but never its content. See
+the README's "Transclusion". `tests/transclusion_e2e.sh` proves the
+no-cascade rule against real builds in CI.)*
 
 - [ ] Transclusion targets MUST be fragments of the same origin (0.2,
-      local-only).
+      local-only). Only threads transclude: a directive in a fragment is
+      refused (a fragment has no `transclusions` to record it in).
 - [ ] A line consisting solely of `![[` + a 26-character item id + `]]`
       is a transclusion directive; the same sequence elsewhere is inert
-      text.
+      text. Fenced code is recognized as inert; a directive-shaped line
+      that Markdown reads as an indented code block or raw HTML fails the
+      build instead of being baked (fence it to keep it as text).
 - [ ] `![[id@vN]]` is reserved: publishers MUST reject it at publish
       time.
 - [ ] Every directive MUST resolve to a local, currently-published
       `kind: "fragment"` item — drafts, withdrawn items, unknown ids, and
-      threads are publish errors.
+      threads are publish errors. "Currently" means after the same stamp
+      run: fragments are planned before threads, so a fragment edited
+      alongside a thread quoting it bakes its new version.
 - [ ] Resolution snapshots the target's latest published version, baked
       into the thread's `content_html` as
       `<blockquote class="blyg-transclusion" data-blyg-id="{id}"
       data-blyg-version="{n}">…</blockquote>` — no link inside.
       `blyg-transclusion` is a permanent wire token.
 - [ ] `content_md` keeps the directives; republishing re-resolves every
-      directive to the then-latest versions.
+      directive to the then-latest versions. An `--amend` revert to the
+      shipped version restores the shipped snapshots instead.
 - [ ] Thread item documents carry a top-level `transclusions` array in
       directive order; fragments omit the key entirely; threads always
       carry it, even as `[]` for a withdrawn thread.
 - [ ] Later edits, withdrawal, or pinning of a source fragment do **not**
-      change a thread's already-baked snapshot (no cascade).
+      change a thread's already-baked snapshot (no cascade): an unchanged
+      thread is never re-resolved, and the template bakes only from the
+      ledger's stored snapshot.
 - [ ] No auto-pin: `transclusions[].version` may name a version with no
       fetchable per-version file.
 

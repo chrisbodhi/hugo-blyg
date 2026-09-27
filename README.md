@@ -177,7 +177,7 @@ who's read Hugo's own RSS template will already expect to see.
   build fails if the page disagrees: a kind change changes the document,
   so it is a publish event that needs a version bump (§5.2), which only
   the stamp script can record. Threads always carry a `transclusions`
-  array (currently always `[]`); fragments omit the key entirely
+  array (see "Transclusion"); fragments omit the key entirely
   (§10.3). Any other value, including `"withdrawn"`, fails the build:
   `"withdrawn"` is a wire-level state this module derives from the
   ledger, never something a page authors directly.
@@ -211,8 +211,10 @@ only applies to versions that involved generation.
 ## The ledger
 
 `data/blyg/ledger.json`, keyed by id, one entry per item:
-`{path, created, version, kind, last_hash, withdrawn, changelog}`, where
-each changelog entry is `{version, at, note, kind, pinned?}`. Produced
+`{path, created, version, kind, last_hash, withdrawn, changelog,
+transclusions?}`, where each changelog entry is `{version, at, note, kind,
+pinned?}`, and `transclusions` (threads with directives only) holds the
+snapshots baked into the thread's latest version — see "Transclusion". Produced
 and maintained by `scripts/blyg_stamp.py` — the templates
 only read it, via `site.Data.blyg.ledger` (Hugo's standard
 `data/<path>` → `site.Data.<path>` mapping). `content_hash` in the item
@@ -373,11 +375,73 @@ own `media/` directory, with a MIME type from the file extension and the
 (e.g. `/img/…`) fails validation: only `media/` files are held
 immutable, and §5.4 requires that of a media URL.
 
+## Transclusion
+
+A thread quotes one of the site's own fragments with a line consisting
+solely of its id in a directive (§10.1):
+
+```md
+Something worth quoting:
+
+![[5cx94j6wbmzrdnnjxvs9j1nkba]]
+```
+
+The same text inline, or inside a fenced code block, is inert. Only
+threads transclude, only same-origin fragments can be transcluded (0.2 is
+local-only), and the reserved `![[id@vN]]` form is refused.
+
+**Resolution happens in `blyg_stamp.py`, at publish time, never in the
+build.** Hugo rebuilds everything on every deploy, so a template that
+resolved `![[id]]` against the fragment's current page would silently
+rewrite every thread quoting it whenever the fragment changed — a
+same-version stealth edit (§13.3), and exactly the cascade §10.4 forbids.
+Instead, whenever the stamp script creates a thread version, it resolves
+each directive to the target's latest published version (after this same
+run, so editing a fragment and the thread quoting it together bakes the
+new version) and stores the snapshot in the thread's ledger entry:
+
+```json
+"transclusions": [
+  {"id": "5cx94j6wbmzrdnnjxvs9j1nkba", "version": 1, "line": 5,
+   "content_hash": "sha256:…", "content_md": "…the fragment's body at v1…"}
+]
+```
+
+A directive that doesn't resolve to a currently-published fragment
+(unknown id, draft, withdrawn, a thread) is a publish error. An
+unchanged thread is never re-resolved: later edits, withdrawal or
+pinning of the fragment leave it alone until the thread itself is
+republished, which re-resolves every directive to the then-latest
+versions. A withdrawn thread's snapshots are dropped (§9), and
+`--amend` reverting a thread restores exactly the snapshots that shipped.
+
+`item.html` bakes each snapshot where its directive line was, as
+`<blockquote class="blyg-transclusion" data-blyg-id="…"
+data-blyg-version="…">…</blockquote>` with no link inside, rendering the
+stored `content_md` in the **fragment's own page context**. That is the
+same rendering that produced the fragment's `content_html` (verified
+byte-identical against Hugo 0.151.0, shortcodes and footnotes included),
+and `blyg_validate.py` checks it byte for byte wherever that version's
+HTML is still on the wire: the fragment's live document while it sits at
+the baked version, or a pin. The item document's `transclusions` is the
+`{id, version}` provenance, in directive order.
+
+Storing the Markdown and rendering it, rather than capturing rendered
+HTML, keeps stamping a single pass that needs no build. The trade-off
+is the one every item's `content_html` already carries: a Hugo upgrade,
+a markup-config change, or a changed shortcode can change the rendered
+bytes without a version bump. The *content* baked into a thread can't
+change, though, since `content_md` is fixed in the ledger and hash-checked
+by both the stamp script and the build.
+
+A directive line becomes a block of its own, so it can sit inside a list
+item (indented to the item's content). One that Markdown would read as
+part of an indented code block or a raw-HTML block fails the build
+rather than bake somewhere unexpected; fence it instead.
+
 ## Not yet built
 
-Transclusion resolution (§10.2): the stamp script refuses any
-`![[id]]` directive line until it's built, because every directive MUST
-resolve. Also not built: pinned per-version JSON files served from
+Not built: pinned per-version JSON files served from
 `static/blyg/items/{id}/v{n}.json` (`scripts/blyg_stamp.py pin <id>`
 writes them; the templates don't read them back), the optional blogroll (§11), generation provenance (§5.7, only
 needed once a version involves generation), and any live HTML permalink
@@ -392,11 +456,15 @@ cd exampleSite                                 # the end-to-end gates
 python3 ../scripts/blyg_stamp.py --check
 hugo --minify
 python3 ../scripts/blyg_validate.py
+../tests/transclusion_e2e.sh                   # §10.4, on a scratch copy
 ```
 
 `exampleSite/go.mod` replaces the module with this checkout, so it always
-builds what's in front of you. CI runs both, and also checks that an
-unstamped body edit fails `hugo`.
+builds what's in front of you. CI runs all of these, and also checks that
+an unstamped body edit fails `hugo`. `transclusion_e2e.sh` edits and then
+withdraws the fragment that `exampleSite`'s transcluding thread quotes,
+rebuilding each time, and fails unless the thread's built `content_html`
+stays byte-identical until the thread is itself re-stamped.
 
 To try a change against a real site before tagging it, point that site's
 `go.mod` at a local checkout — the same `go list` recipe under "Scripts"

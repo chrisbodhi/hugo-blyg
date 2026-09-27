@@ -32,6 +32,7 @@ import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 # The consuming site's root. These scripts ship inside the hugo-blyg module,
 # so every default path is relative to where they're run from -- run them
@@ -133,21 +134,86 @@ def find_directives(body: str) -> list[tuple[int, str, bool]]:
     return found
 
 
-def check_directives(path: Path, body: str) -> None:
-    """Transclusion resolution (§10.2) isn't built yet, and every directive
-    MUST resolve -- so any directive at all is a publish error for now,
-    rather than shipping it as literal text with an empty `transclusions`."""
+def check_directives(path: Path, body: str, kind: str) -> None:
+    """Grammar-level refusals, independent of what a directive points at:
+    the reserved `![[id@vN]]` form (§10.1), and any directive in a
+    fragment -- only threads transclude, and a fragment has no
+    `transclusions` array to record the provenance in (§10.3)."""
     for lineno, line, reserved in find_directives(body):
         if reserved:
             raise BlygStampError(
                 f"{path}: body line {lineno}: {line!r} uses the reserved "
                 f"![[id@vN]] form, which publishers MUST reject (§10.1)")
+        if kind != "thread":
+            raise BlygStampError(
+                f"{path}: body line {lineno}: {line!r} is a transclusion "
+                f"directive (§10.1), but only threads transclude -- set "
+                f"blyg_kind = \"thread\", or put it inside a code fence to "
+                f"keep it as inert text.")
+
+
+# resolve(target_id) -> (version, content_md) for a fragment that is
+# published after this run, or a string saying why it can't be transcluded.
+Resolver = Callable[[str], "tuple[int, str] | str"]
+
+
+def resolve_directives(item: "Item", resolve: Resolver) -> list[dict]:
+    """§10.2: snapshot every directive's target at its latest published
+    version, in directive order. The snapshot is the fragment's
+    content_md at that version -- the template renders it in the
+    fragment's own page context, which reproduces the fragment's
+    content_html byte for byte (blyg_validate.py checks exactly that
+    whenever the fragment still sits at the baked version). Storing it
+    here, at publish time, is what keeps later edits to the fragment
+    from reaching an already-published thread (§10.4)."""
+    snapshots = []
+    for lineno, line, _ in find_directives(item.body):
+        target = DIRECTIVE_RE.match(line).group(1)
+        resolved = resolve(target)
+        if isinstance(resolved, str):
+            raise BlygStampError(
+                f"{item.path}: body line {lineno}: {line!r} can't be resolved: "
+                f"{resolved} -- every directive MUST resolve to a local, "
+                f"currently-published fragment (§10.2)")
+        version, content_md = resolved
+        snapshots.append({"id": target, "version": version, "line": lineno,
+                          "content_hash": content_hash(content_md),
+                          "content_md": content_md})
+    return snapshots
+
+
+def set_transclusions(entry: dict, snapshots: list[dict]) -> None:
+    """A thread's ledger entry carries `transclusions` only while it has
+    any; absent means [] (and is all a fragment or an endcap ever has)."""
+    if snapshots:
+        entry["transclusions"] = snapshots
+    else:
+        entry.pop("transclusions", None)
+
+
+def check_stored_transclusions(item: "Item", entry: dict) -> None:
+    """An unchanged thread keeps the snapshots it was published with, no
+    matter what its sources have done since (§10.4) -- so nothing is
+    re-resolved here, only checked for having been baked from exactly
+    this body."""
+    stored = entry.get("transclusions", [])
+    if entry["withdrawn"] or entry["kind"] != "thread":
+        want = []
+    else:
+        want = [(lineno, DIRECTIVE_RE.match(line).group(1))
+                for lineno, line, _ in find_directives(item.body)]
+    got = [(s.get("line"), s.get("id")) for s in stored]
+    if got != want:
         raise BlygStampError(
-            f"{path}: body line {lineno}: {line!r} is a transclusion "
-            f"directive (§10.1), and every directive MUST resolve at publish "
-            f"time (§10.2) -- resolution isn't implemented yet, so this "
-            f"can't be published. Put it inside a code fence to keep it "
-            f"as inert text.")
+            f"{item.path}: ledger entry {item.blyg_id} records transclusions "
+            f"{got} but the body's directives are {want} -- the ledger was "
+            f"edited by hand; restore it rather than re-resolving silently")
+    for s in stored:
+        if s.get("content_hash") != content_hash(s.get("content_md", "")):
+            raise BlygStampError(
+                f"ledger entry {item.blyg_id}: the snapshot of {s.get('id')} "
+                f"v{s.get('version')} doesn't match its content_hash -- a baked "
+                f"snapshot MUST NOT change without a new thread version (§10.4)")
 
 
 def parse_date_utc(value: str) -> datetime.datetime:
@@ -256,6 +322,9 @@ class Plan:
     ledger_entry: dict | None = None
     write_blyg_id: bool = False
     warning: str | None = None
+    # The item's ledger entry once this plan is applied, whether or not
+    # this run writes -- what a thread in the same run resolves against.
+    next_entry: dict | None = None
 
 
 UNCHANGED_PLAN_KINDS = ("noop", "draft-skip", "future-skip")
@@ -299,17 +368,25 @@ def changelog_entry(version: int, at: str, note: str | None, kind: str) -> dict:
 
 def plan_for_item(item: Item, ledger: dict, *, write: bool,
                   now: datetime.datetime, note: str | None = None,
-                  published: dict | None = None) -> Plan:
+                  published: dict | None = None,
+                  resolve: Resolver | None = None) -> Plan:
     """Plan one file. `published` is the ledger as of the last deploy,
     and is only passed with --amend: when it is, a latest version that
     ledger doesn't contain yet has never been served, so it is rewritten
     in place (or reverted) instead of bumped again -- §5.2's "draft saves
     are invisible to the protocol". Without it, every ledgered version is
     assumed shipped, which can only ever over-count versions, never
-    rewrite one a reader may already have seen."""
+    rewrite one a reader may already have seen.
+
+    `resolve` looks up a transclusion target's state after this run
+    (run_stamp plans every fragment before any thread); it's only
+    consulted when a thread gets a new version, since an unchanged
+    thread keeps its baked snapshots (§10.4)."""
     warning = None
+    if resolve is None:
+        resolve = lambda target: "no resolver given"  # noqa: E731
     if not item.withdrawn_flag:
-        check_directives(item.path, item.body)
+        check_directives(item.path, item.body, item.kind)
         if item.kind == "fragment" and len(item.body) > FRAGMENT_SOFT_CAP:
             warning = (f"{item.path.name}: fragment content_md is {len(item.body)} "
                        f"characters; §5.3 says publishers SHOULD cap fragments "
@@ -335,6 +412,7 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
                 f"{item.path}: expiryDate would make Hugo stop building this item, "
                 f"but items/{{id}}.json MUST stay 200 forever once published (§4)")
         created = iso8601_utc(item.publish_at)
+        snapshots = resolve_directives(item, resolve) if item.kind == "thread" else []
 
         if not write:
             # Ids are 128 random bits from a cryptographically strong
@@ -359,9 +437,11 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
             "withdrawn": False,
             "changelog": [changelog_entry(1, created, note, item.kind)],
         }
+        set_transclusions(entry, snapshots)
         return Plan(kind="new", path=item.path, blyg_id=new_id,
                     detail=f"assign id, v1 @ {created}",
-                    ledger_entry=entry, write_blyg_id=True, warning=warning)
+                    ledger_entry=entry, write_blyg_id=True, warning=warning,
+                    next_entry=entry)
 
     if not is_valid_blyg_id(item.blyg_id):
         raise BlygStampError(f"{item.path}: blyg_id {item.blyg_id!r} is not "
@@ -404,13 +484,15 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
     current = entry_state(entry)
     desired = desired_state(item, entry)
     if desired == current:
+        check_stored_transclusions(item, entry)
         if new_entry != entry:
             return Plan(kind="moved", path=item.path, blyg_id=item.blyg_id,
                         detail=f"path {entry['path']} -> {item.rel_path} (no version change)",
-                        ledger_entry=(new_entry if write else None), warning=warning)
+                        ledger_entry=(new_entry if write else None), warning=warning,
+                        next_entry=new_entry)
         detail = "withdrawn: no-op" if entry["withdrawn"] else "unchanged"
         return Plan(kind="noop", path=item.path, blyg_id=item.blyg_id,
-                    detail=detail, warning=warning)
+                    detail=detail, warning=warning, next_entry=entry)
 
     new_entry["kind"], new_entry["withdrawn"], new_entry["last_hash"] = desired
     at_now = iso8601_utc(now)
@@ -427,10 +509,21 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
         # Every unshipped version is undone: back to exactly what shipped.
         new_entry["version"] = pub["version"]
         new_entry["changelog"] = entry["changelog"][:pub["version"]]
+        # The shipped version's snapshots, not fresh ones: v{n} is what
+        # readers already have, down to the baked transclusions.
+        set_transclusions(new_entry, copy.deepcopy(pub.get("transclusions", [])))
         verb = "would revert" if not write else "revert"
         return Plan(kind="revert", path=item.path, blyg_id=item.blyg_id,
                     detail=f"{verb} unshipped v{entry['version']} -> shipped v{pub['version']}",
-                    ledger_entry=(new_entry if write else None), warning=warning)
+                    ledger_entry=(new_entry if write else None), warning=warning,
+                    next_entry=new_entry)
+
+    # Anything past a revert is a new (or rewritten) version: a thread
+    # re-resolves every directive to the then-latest versions (§10.2),
+    # and an endcap empties them (§9).
+    publishing_thread = desired[0] == "thread" and not desired[1]
+    set_transclusions(new_entry,
+                      resolve_directives(item, resolve) if publishing_thread else [])
 
     if can_amend:
         if pub is None and desired[1]:
@@ -454,7 +547,8 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
         verb = "would amend" if not write else "amend"
         return Plan(kind="amend", path=item.path, blyg_id=item.blyg_id,
                     detail=f"{verb} unshipped v{version} ({plan_kind}) @ {at}",
-                    ledger_entry=(new_entry if write else None), warning=warning)
+                    ledger_entry=(new_entry if write else None), warning=warning,
+                    next_entry=new_entry)
 
     plan_kind, default_note = transition(current[1], desired[1])
     version = entry["version"] + 1
@@ -474,7 +568,8 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
     if current[0] != desired[0] and not desired[1]:
         detail += f" (kind {current[0]} -> {desired[0]})"
     return Plan(kind=plan_kind, path=item.path, blyg_id=item.blyg_id, detail=detail,
-                ledger_entry=(new_entry if write else None), warning=warning)
+                ledger_entry=(new_entry if write else None), warning=warning,
+                next_entry=new_entry)
 
 
 def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
@@ -483,7 +578,6 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
     ledger = load_ledger(ledger_path)
-    plans: list[Plan] = []
     seen: dict[str, Path] = {}
 
     items = [load_item(path, content_dir) for path in discover_items(content_dir)]
@@ -505,10 +599,31 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
                 f"keep serving items/{blyg_id}.json forever (§4); restore the "
                 f"file (withdraw it with blyg_withdrawn = true if it should go)")
 
-    for item in items:
+    by_id = {item.blyg_id: item for item in items if item.blyg_id is not None}
+    after: dict[str, dict] = {}  # id -> ledger entry once this run is applied
+
+    def resolve(target: str) -> tuple[int, str] | str:
+        item = by_id.get(target)
+        if item is None or target not in ledger:
+            return f"{target} isn't a published item on this origin (unknown id or draft)"
+        if item.kind != "fragment":
+            return f"{target} is a thread; only fragments can be transcluded at 0.2"
+        if item.withdrawn_flag:
+            return f"{target} is withdrawn"
+        return after[target]["version"], item.body
+
+    # Fragments first, so a thread stamped in the same run bakes the
+    # version this run gives its sources -- the then-latest (§10.2).
+    # Plans are still reported in file order.
+    order = sorted(range(len(items)), key=lambda i: items[i].kind == "thread")
+    by_index: dict[int, Plan] = {}
+    for i in order:
+        item = items[i]
         plan = plan_for_item(item, ledger, write=write, now=now, note=note,
-                             published=published)
-        plans.append(plan)
+                             published=published, resolve=resolve)
+        by_index[i] = plan
+        if plan.blyg_id is not None and plan.next_entry is not None:
+            after[plan.blyg_id] = plan.next_entry
 
         if not write or plan.kind in UNCHANGED_PLAN_KINDS:
             continue
@@ -519,6 +634,7 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
         if plan.write_blyg_id:
             text = item.path.read_text(encoding="utf-8")
             item.path.write_text(insert_blyg_id_line(text, plan.blyg_id), encoding="utf-8")
+    plans = [by_index[i] for i in range(len(items))]
 
     if write:
         save_ledger(ledger_path, ledger)
