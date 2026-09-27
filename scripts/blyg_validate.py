@@ -10,13 +10,6 @@ anything ships.
 
 Usage:
     blyg_validate.py [--public-dir public] [--ledger-path data/blyg/ledger.json]
-    blyg_validate.py --check-cors <base-url>
-
-`--check-cors` is a separate, opt-in, post-deploy check: the build
-output alone can't prove a live server actually sends the header, so
-it isn't one of the three build gates and isn't run against
-exampleSite in CI. Run it by hand against a real deployment's blyg
-base URL (e.g. https://example.org/blyg/).
 
 Exits 1 and lists every problem found; 0 when the surface conforms.
 """
@@ -30,11 +23,9 @@ import html.parser
 import json
 import re
 import sys
-import urllib.error
-import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -52,9 +43,6 @@ URL_ATTRS = {"href", "src", "poster", "cite", "action", "formaction", "data",
 EMBED_TAGS = {"img", "source", "video", "audio", "track", "embed", "object", "input"}
 CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)([^'\")]*)\1\s*\)")
 SAFE_SCHEMES = ("http:", "https:", "mailto:", "tel:", "data:")
-
-# §4 (SHOULD): representative JSON and XML surfaces to probe for CORS.
-CORS_CHECK_FILES = ("blyg.json", "feed.xml")
 
 
 class Problems(list):
@@ -409,32 +397,6 @@ def check_feed(public_blyg: Path, ledger: dict, docs: dict, manifest: dict,
                 problems.add(where, f"withdrawn {blyg_id} MUST contribute exactly its withdrawal entry (§7)")
 
 
-def check_cors(base_url: str, opener=urllib.request.urlopen) -> Problems:
-    """§4 (SHOULD): probe a live deployment for permissive CORS on the
-    JSON/XML surface. Opt-in and post-deploy -- the build output alone
-    can't prove a server actually sends the header."""
-    problems = Problems()
-    if not base_url.endswith("/"):
-        base_url += "/"
-    for name in CORS_CHECK_FILES:
-        url = urljoin(base_url, name)
-        request = urllib.request.Request(url, method="HEAD")
-        try:
-            with opener(request, timeout=10) as response:
-                header = response.headers.get("Access-Control-Allow-Origin")
-        except urllib.error.HTTPError as exc:
-            header = exc.headers.get("Access-Control-Allow-Origin") if exc.headers else None
-            if header is None:
-                problems.add(url, f"HTTP {exc.code} fetching it")
-                continue
-        except urllib.error.URLError as exc:
-            problems.add(url, f"couldn't fetch it: {exc.reason}")
-            continue
-        if header != "*":
-            problems.add(url, f"Access-Control-Allow-Origin is {header!r}, want '*' (§4 SHOULD)")
-    return problems
-
-
 def validate(public_dir: Path, ledger_path: Path) -> Problems:
     problems = Problems()
     public_blyg = public_dir / "blyg"
@@ -468,21 +430,7 @@ def main(argv: list[str] | None = None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--public-dir", default=str(bs.DEFAULT_PUBLIC_DIR))
     parser.add_argument("--ledger-path", default=str(bs.DEFAULT_LEDGER_PATH))
-    parser.add_argument("--check-cors", metavar="BASE_URL", default=None,
-                        help="skip the build-side checks; instead probe this deployed "
-                             "blyg base URL (e.g. https://example.org/blyg/) for "
-                             "permissive CORS on blyg.json and feed.xml")
     args = parser.parse_args(argv)
-
-    if args.check_cors is not None:
-        problems = check_cors(args.check_cors)
-        for p in problems:
-            print(f"error: {p}", file=sys.stderr)
-        if problems:
-            print(f"\n{len(problems)} CORS problem(s).", file=sys.stderr)
-            return 1
-        print("CORS looks good.")
-        return 0
 
     problems = validate(Path(args.public_dir), Path(args.ledger_path))
     for p in problems:

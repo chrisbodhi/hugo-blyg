@@ -63,8 +63,6 @@ completeness but not all are load-bearing today.
       site automatically; a site's own copy still overrides it). Off
       Apache, the site must add the equivalent itself — see the README's
       "Setup" for Netlify/Cloudflare Pages, nginx, and S3/CloudFront.
-      `scripts/blyg_validate.py --check-cors <base-url>` checks a live
-      deployment.
 
 ## §5 — The item document (`items/{id}.json`)
 

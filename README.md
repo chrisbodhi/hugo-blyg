@@ -246,10 +246,6 @@ working directory.
   yours).
 - `scripts/blyg_validate.py` checks the built `public/blyg/` against the
   ledger and the spec; a site's CI runs it after `hugo`.
-  `--check-cors <base-url>` is a separate, opt-in mode against a live
-  deployment (e.g. `https://example.org/blyg/`) that probes for the §4
-  CORS header instead — the build output alone can't prove a server
-  actually sends it, so this isn't a build gate and isn't run in CI.
 - `scripts/blyg_from_issue.py` backs the action below.
 
 The scripts ship inside the module, so run the copy at the exact version
