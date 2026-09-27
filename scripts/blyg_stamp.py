@@ -136,14 +136,26 @@ def find_directives(body: str) -> list[tuple[int, str, bool]]:
 
 def check_directives(path: Path, body: str, kind: str) -> None:
     """Grammar-level refusals, independent of what a directive points at:
-    the reserved `![[id@vN]]` form (§10.1), and any directive in a
-    fragment -- only threads transclude, and a fragment has no
-    `transclusions` array to record the provenance in (§10.3)."""
+    the reserved `![[id@vN]]` form (§10.1); a directive whose surrounding
+    whitespace isn't plain spaces and tabs (DIRECTIVE_RE's `\s` also
+    matches e.g. U+00A0, which Markdown and item.html don't strip, so
+    refusing it here beats a build failure after stamping); and any
+    directive in a fragment -- only threads transclude, and a fragment
+    has no `transclusions` array to record the provenance in (§10.3)."""
     for lineno, line, reserved in find_directives(body):
         if reserved:
             raise BlygStampError(
                 f"{path}: body line {lineno}: {line!r} uses the reserved "
                 f"![[id@vN]] form, which publishers MUST reject (§10.1)")
+        raw = body.split("\n")[lineno - 1]
+        if raw.strip(" \t\r") != line:
+            others = sorted({f"U+{ord(c):04X}" for c in raw.replace(line, "")
+                             if c not in " \t\r"})
+            raise BlygStampError(
+                f"{path}: body line {lineno}: {line!r} is surrounded by "
+                f"whitespace other than spaces and tabs ({', '.join(others)}) -- "
+                f"Markdown doesn't treat that as indentation, so the line "
+                f"can't be baked as a block of its own; use plain spaces")
         if kind != "thread":
             raise BlygStampError(
                 f"{path}: body line {lineno}: {line!r} is a transclusion "
@@ -155,6 +167,32 @@ def check_directives(path: Path, body: str, kind: str) -> None:
 # resolve(target_id) -> (version, content_md) for a fragment that is
 # published after this run, or a string saying why it can't be transcluded.
 Resolver = Callable[[str], "tuple[int, str] | str"]
+
+# stale(snapshot) -> why a stored snapshot no longer names what its
+# source's version holds after this run, or None if it still does.
+StaleCheck = Callable[[dict], "str | None"]
+
+
+def snapshot_staleness(snapshot: dict, source: dict | None) -> str | None:
+    """A baked snapshot is provenance: "this is {id} v{n}" (§10.3). That
+    stays true forever once v{n} ships -- later versions of the source
+    leave it alone (§10.4) -- but --amend can undo or rewrite a version
+    that never shipped, and a thread that baked it would then name a
+    version that no longer exists, or exists with different content.
+    `source` is the source's ledger entry after this run."""
+    sid, version = snapshot.get("id"), snapshot.get("version")
+    if source is None:
+        return f"{sid} is no longer in the ledger"
+    if not isinstance(version, int) or isinstance(version, bool):
+        return f"{sid} has version {version!r}, not a version number"
+    if version > source["version"]:
+        return (f"{sid} v{version} was undone (the source is at "
+                f"v{source['version']} now)")
+    if version == source["version"] and (
+            source["withdrawn"] or source["kind"] != "fragment"
+            or source["last_hash"] != snapshot.get("content_hash")):
+        return f"{sid} v{version} was rewritten in place"
+    return None
 
 
 def resolve_directives(item: "Item", resolve: Resolver) -> list[dict]:
@@ -369,7 +407,8 @@ def changelog_entry(version: int, at: str, note: str | None, kind: str) -> dict:
 def plan_for_item(item: Item, ledger: dict, *, write: bool,
                   now: datetime.datetime, note: str | None = None,
                   published: dict | None = None,
-                  resolve: Resolver | None = None) -> Plan:
+                  resolve: Resolver | None = None,
+                  stale: StaleCheck | None = None) -> Plan:
     """Plan one file. `published` is the ledger as of the last deploy,
     and is only passed with --amend: when it is, a latest version that
     ledger doesn't contain yet has never been served, so it is rewritten
@@ -381,7 +420,11 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
     `resolve` looks up a transclusion target's state after this run
     (run_stamp plans every fragment before any thread); it's only
     consulted when a thread gets a new version, since an unchanged
-    thread keeps its baked snapshots (§10.4)."""
+    thread keeps its baked snapshots (§10.4) -- unless `stale` says one
+    of them names a source version this --amend run undid or rewrote,
+    in which case the thread's own (necessarily unshipped) version is
+    amended to re-resolve. Without --amend that can only mean a
+    hand-edited ledger, and is refused."""
     warning = None
     if resolve is None:
         resolve = lambda target: "no resolver given"  # noqa: E731
@@ -483,8 +526,18 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
 
     current = entry_state(entry)
     desired = desired_state(item, entry)
+    stale_reasons = []
     if desired == current:
         check_stored_transclusions(item, entry)
+        if stale is not None:
+            stale_reasons = [r for r in map(stale, entry.get("transclusions", [])) if r]
+        if stale_reasons and published is None:
+            raise BlygStampError(
+                f"{item.path}: ledger entry {item.blyg_id} bakes snapshots that no "
+                f"longer match their sources ({'; '.join(stale_reasons)}) -- a "
+                f"version can only be undone or rewritten by --amend, so the "
+                f"ledger was edited by hand; restore it")
+    if desired == current and not stale_reasons:
         if new_entry != entry:
             return Plan(kind="moved", path=item.path, blyg_id=item.blyg_id,
                         detail=f"path {entry['path']} -> {item.rel_path} (no version change)",
@@ -504,6 +557,14 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
         shipped_version = pub["version"] if pub else 0
     unshipped = entry["changelog"][shipped_version:]
     can_amend = bool(unshipped) and not any(e.get("pinned") for e in unshipped)
+    if stale_reasons and not can_amend:
+        # A thread version bakes only what was in the ledger when it was
+        # stamped, so one that shipped (or was pinned) can't have baked a
+        # source version --amend is still allowed to change.
+        raise BlygStampError(
+            f"{item.path}: {item.blyg_id} v{entry['version']} has shipped or is "
+            f"pinned, but bakes snapshots that no longer match their sources "
+            f"({'; '.join(stale_reasons)}) -- check --published-ref")
 
     if can_amend and pub is not None and desired == entry_state(pub):
         # Every unshipped version is undone: back to exactly what shipped.
@@ -545,8 +606,11 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
                             wire_kind(desired))
         ]
         verb = "would amend" if not write else "amend"
+        detail = f"{verb} unshipped v{version} ({plan_kind}) @ {at}"
+        if stale_reasons:
+            detail += f" (re-resolved: {'; '.join(stale_reasons)})"
         return Plan(kind="amend", path=item.path, blyg_id=item.blyg_id,
-                    detail=f"{verb} unshipped v{version} ({plan_kind}) @ {at}",
+                    detail=detail,
                     ledger_entry=(new_entry if write else None), warning=warning,
                     next_entry=new_entry)
 
@@ -612,15 +676,26 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
             return f"{target} is withdrawn"
         return after[target]["version"], item.body
 
+    def stale(snapshot: dict) -> str | None:
+        source = after.get(snapshot.get("id")) or ledger.get(snapshot.get("id"))
+        return snapshot_staleness(snapshot, source)
+
     # Fragments first, so a thread stamped in the same run bakes the
     # version this run gives its sources -- the then-latest (§10.2).
+    # Then items only now becoming threads (they were fragments, so a
+    # thread's snapshot may name them), then everything already a thread,
+    # which is all that can hold snapshots to check for staleness.
     # Plans are still reported in file order.
-    order = sorted(range(len(items)), key=lambda i: items[i].kind == "thread")
+    def tier(item: Item) -> int:
+        if item.kind != "thread":
+            return 0
+        return 2 if ledger.get(item.blyg_id or "", {}).get("kind") == "thread" else 1
+    order = sorted(range(len(items)), key=lambda i: tier(items[i]))
     by_index: dict[int, Plan] = {}
     for i in order:
         item = items[i]
         plan = plan_for_item(item, ledger, write=write, now=now, note=note,
-                             published=published, resolve=resolve)
+                             published=published, resolve=resolve, stale=stale)
         by_index[i] = plan
         if plan.blyg_id is not None and plan.next_entry is not None:
             after[plan.blyg_id] = plan.next_entry

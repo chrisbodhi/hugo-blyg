@@ -259,6 +259,20 @@ class TransclusionSurfaceTests(SurfaceTests):
                            self.feed_item(FRAG, 1, self.docs[FRAG])]
         self.assertEqual(self.problems(), [])
 
+    def test_provenance_naming_a_never_published_version_fails(self):
+        # What an --amend revert of the source left behind before
+        # blyg_stamp.py learned to re-resolve: FRAG is at v1, the thread
+        # names v2 -- consistently everywhere, so only the changelog tells.
+        self.ledger[ID]["transclusions"][0]["version"] = 2
+        self.docs[ID]["transclusions"] = [{"id": FRAG, "version": 2}]
+        self.docs[ID]["content_html"] = "<p>Intro.</p>\n" + bv.wrapper(FRAG, 2, self.FRAG_HTML)
+        self.assertTrue(any(f"{FRAG} v2, a version {FRAG} has never published" in p
+                            for p in self.problems()))
+
+    def test_provenance_naming_a_non_fragment_version_fails(self):
+        self.ledger[FRAG]["changelog"][0]["kind"] = "thread"
+        self.assertTrue(any("not a fragment" in p for p in self.problems()))
+
     def test_withdrawn_thread_carries_empty_transclusions(self):
         self.ledger[ID].update(version=2, withdrawn=True, last_hash=bs.EMPTY_CONTENT_HASH)
         self.ledger[ID]["changelog"].append(
