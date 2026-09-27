@@ -58,8 +58,13 @@ completeness but not all are load-bearing today.
       `static/blyg/media/`, tracked in `data/blyg/media.json`.
 - [ ] All protocol timestamps MUST be ISO 8601 UTC (`…Z`), except the
       RFC 822 dates inside `feed.xml`.
-- [ ] (SHOULD) Permissive CORS on JSON/XML: `static/blyg/.htaccess`
-      (the deploy target is Apache).
+- [ ] (SHOULD) Permissive CORS on JSON/XML: shipped for Apache as this
+      module's own `static/blyg/.htaccess` (mounted into every consuming
+      site automatically; a site's own copy still overrides it). Off
+      Apache, the site must add the equivalent itself — see the README's
+      "Setup" for Netlify/Cloudflare Pages, nginx, and S3/CloudFront.
+      `scripts/blyg_validate.py --check-cors <base-url>` checks a live
+      deployment.
 
 ## §5 — The item document (`items/{id}.json`)
 

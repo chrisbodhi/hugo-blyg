@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -196,6 +197,45 @@ class SurfaceTests(unittest.TestCase):
         self.ledger[ID]["changelog"][0]["pinned"] = True
         self.docs[ID]["changelog"][0]["pinned"] = True
         self.assertTrue(any("pin" in p for p in self.problems()))
+
+
+class _FakeResponse:
+    def __init__(self, headers):
+        self.headers = headers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class CorsCheckTests(unittest.TestCase):
+    """§4 (SHOULD): --check-cors probes a live deployment; the opener is
+    faked here so the tests never touch the network."""
+
+    def test_permissive_cors_passes(self):
+        opener = lambda request, timeout=None: _FakeResponse(  # noqa: E731
+            {"Access-Control-Allow-Origin": "*"})
+        self.assertEqual(bv.check_cors("https://example.org/blyg/", opener=opener), [])
+
+    def test_missing_header_fails(self):
+        opener = lambda request, timeout=None: _FakeResponse({})  # noqa: E731
+        problems = bv.check_cors("https://example.org/blyg", opener=opener)
+        self.assertEqual(len(problems), len(bv.CORS_CHECK_FILES))
+
+    def test_wrong_value_fails(self):
+        opener = lambda request, timeout=None: _FakeResponse(  # noqa: E731
+            {"Access-Control-Allow-Origin": "https://only-this.example"})
+        problems = bv.check_cors("https://example.org/blyg/", opener=opener)
+        self.assertEqual(len(problems), len(bv.CORS_CHECK_FILES))
+
+    def test_unreachable_url_reported(self):
+        def opener(request, timeout=None):
+            raise urllib.error.URLError("no route")
+        problems = bv.check_cors("https://example.org/blyg/", opener=opener)
+        self.assertEqual(len(problems), len(bv.CORS_CHECK_FILES))
+        self.assertTrue(all("couldn't fetch it" in p for p in problems))
 
 
 if __name__ == "__main__":
