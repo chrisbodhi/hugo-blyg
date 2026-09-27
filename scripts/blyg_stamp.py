@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stamp content/blyg/*.md with blyg ids and maintain data/blyg/ledger.json.
 
-See docs/blyg/conformance.md for the protocol rules this implements
+See docs/conformance.md for the protocol rules this implements
 (blygger-spec docs/protocol-v0.2.md, pinned at c5884b9).
 
 Usage:
@@ -85,7 +85,7 @@ def split_front_matter(text: str) -> tuple[str, str]:
 
     `body` is exactly what Hugo's .RawContent produces: the file's bytes
     after the closing `+++` delimiter line, untouched -- verified
-    empirically against Hugo 0.151.0 (see docs/blyg/conformance.md),
+    empirically against Hugo 0.151.0 (see docs/conformance.md),
     including the leading-newline and no-trailing-newline edge cases.
     """
     if not text.startswith(FRONT_MATTER_OPEN):
@@ -153,7 +153,8 @@ def check_directives(path: Path, body: str) -> None:
 def parse_date_utc(value: str) -> datetime.datetime:
     """Parse a front-matter `date` string, defaulting to UTC when no offset
     is given -- matching Hugo's own behavior when no `timeZone` is
-    configured (site has none; see docs/blyg/hazards.md)."""
+    configured. A site that sets `timeZone` should give blyg dates an
+    explicit offset."""
     dt = datetime.datetime.fromisoformat(value)
     if dt.tzinfo is None:
         return dt.replace(tzinfo=datetime.timezone.utc)

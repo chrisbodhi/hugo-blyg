@@ -2,7 +2,7 @@
 """Validate a built blyg surface (public/blyg/) against the ledger and
 blygger-spec docs/protocol-v0.2.md (pinned at c5884b9).
 
-This is the build-side half of docs/blyg/conformance.md: everything
+This is the build-side half of docs/conformance.md: everything
 scripts/blyg_stamp.py can't see because Hugo produces it -- the rendered
 content_html above all -- plus a cross-check that every surface agrees
 with data/blyg/ledger.json. CI runs it after `hugo --minify`, before

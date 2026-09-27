@@ -27,7 +27,7 @@
     - The <?xml ...?> prolog is piped through `safeHTML`: a literal
       "<?xml" in static template text confuses html/template's escaper
       even with zero actions involved (empirically confirmed against
-      Hugo 0.151.0 -- see docs/blyg/conformance.md), but wrapping it in
+      Hugo 0.151.0 -- see docs/conformance.md), but wrapping it in
       an action whose output is marked safe sidesteps that entirely.
     - content_html is escaped with `transform.XMLEscape` (not CDATA --
       so behavior doesn't change under --minify, and a literal "]]>"

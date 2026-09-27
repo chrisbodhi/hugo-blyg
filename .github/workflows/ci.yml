@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python3 -m unittest discover -s tests
+
+  example:
+    name: Build and validate exampleSite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: exampleSite
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: "0.151.0"
+          extended: true
+
+      # The same three gates a consuming site runs (docs/conformance.md).
+      - name: Check blyg content is stamped
+        run: python3 ../scripts/blyg_stamp.py --check
+      - name: Build
+        run: hugo --minify
+      - name: Validate blyg surface
+        run: python3 ../scripts/blyg_validate.py
+
+      # And the build gate itself: an unstamped body edit must fail hugo,
+      # not ship as a same-version stealth edit (§13.3).
+      - name: Unstamped edit fails the build
+        run: |
+          echo "An unstamped edit." >> content/blyg/2026-09-02-first-thread.md
+          if hugo --minify; then
+            echo "::error::hugo built an unstamped edit"
+            exit 1
+          fi

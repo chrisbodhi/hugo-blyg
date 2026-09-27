@@ -55,10 +55,10 @@
   {{- end -}}
   {{- /*
     content_html must be self-contained (§7): absolute URLs everywhere.
-    Render hooks alone don't cover this site's shortcodes (plate's src=,
-    skyhook-viz's injected <img>/<script>) -- see docs/blyg/hazards.md --
-    so this rewrites the fully rendered HTML directly: every
-    root-relative URL attribute (either quote style), every candidate
+    Render hooks alone don't cover shortcodes that emit raw HTML with
+    root-relative URLs (an <img> whose src went through relURL, an
+    injected <script src="/js/...">), so this rewrites the fully
+    rendered HTML directly: every root-relative URL attribute (either quote style), every candidate
     inside srcset, and url(...) in inline styles. RE2 (Hugo's regex
     engine) has no lookahead, hence capturing-and-replaying the char
     after the slash rather than a negative lookahead, to skip

@@ -55,7 +55,7 @@ def slugify(title: str) -> str:
 def normalize_body(body: str) -> str:
     """Issues edited in the web UI arrive with CRLF line endings; the
     content hash covers content_md's exact bytes (§5.1), so settle on LF
-    before stamping, matching the rest of the repo (docs/blyg/hazards.md)."""
+    before stamping, matching how content files are normally committed."""
     body = body.replace("\r\n", "\n").replace("\r", "\n")
     return body.rstrip("\n") + "\n"
 

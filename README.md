@@ -6,29 +6,45 @@ A Hugo Module that builds the static publish-side surfaces of the
 and `items/{id}.json` (canonical item documents) — from a section of
 ordinary Hugo Markdown content plus a small JSON ledger.
 
-Developed in-repo at `newschematic/modules/hugo-blyg`, wired in via a
-local Go `replace` directive rather than a real module path, so it can be
-pulled out into its own repository later by deleting one line
-(`replace github.com/chrisbodhi/hugo-blyg => ./modules/hugo-blyg` in the
-consuming site's `go.mod`) and pointing the import at wherever it lands.
-Nothing in this directory references `newschematic.org` or any other
-site-specific value — those all come in from the consuming site.
+It comes in three parts:
 
-## What it owns vs. what the consuming site must provide
+- **Templates** (`layouts/`), imported as a Hugo Module, that shape every
+  document and fail the build when content and ledger disagree.
+- **Scripts** (`scripts/`, Python 3.11+, standard library only) that
+  assign ids and keep the ledger (`blyg_stamp.py`), and check the built
+  output against the spec (`blyg_validate.py`).
+- **A GitHub Action** (`publish-from-issue/`) that turns an issue into a
+  stamped fragment and opens a PR for it.
+
+[`docs/conformance.md`](docs/conformance.md) is the spec checklist all
+three are built and reviewed against. [`exampleSite/`](exampleSite) is the
+smallest site that uses it, and what CI builds.
+
+Requirements: Hugo (verified against 0.151.0; other versions are
+untested), Go (Hugo Modules use it to fetch modules), and Python 3.11+
+for the scripts.
+
+## Setup
 
 Hugo Modules merge an imported module's `layouts/`, `data/`, `static/`,
 `archetypes/`, and `i18n/` into the site's own filesystem automatically.
 They do **not** merge a module's own `hugo.toml`/`config.toml` — site-wide
 configuration (`[outputFormats]`, `[mediaTypes]`, `[outputs]`, `[params]`)
-has to be declared by whatever site imports this module. (Verified
-empirically against Hugo 0.151.0 — see `docs/blyg/conformance.md` in the
-consuming site for the write-up.)
+has to be declared by whatever site imports this module (verified
+empirically against Hugo 0.151.0). So this module owns all the actual
+document-shaping logic — `layouts/partials/blyg/item.html` builds one item
+document; `layouts/blyg/section.blygmanifest.json` and
+`layouts/blyg/section.blygfeed.xml` build the four surfaces — and the site
+supplies four things.
 
-So this module owns all the actual document-shaping logic —
-`layouts/partials/blyg/item.html` builds one item document;
-`layouts/blyg/section.blygmanifest.json` and
-`layouts/blyg/section.blygfeed.xml` build the four surfaces — and the
-site must add:
+**1. The module.** If the site isn't a Hugo Module yet, `hugo mod init
+<your-site-module-path>` first. Then:
+
+```sh
+hugo mod get github.com/chrisbodhi/hugo-blyg@v0.1.0
+```
+
+**2. Config**, in `hugo.toml` (or `config.toml`):
 
 ```toml
 [module]
@@ -38,16 +54,19 @@ site must add:
 [outputFormats]
   [outputFormats.blygmanifest]
     mediaType = "application/json"
-    isPlainText = true          # load-bearing -- see note below
+    isPlainText = true          # load-bearing -- see below
     baseName = "blyg"
   [outputFormats.blygfeed]
     mediaType = "application/rss+xml"
     baseName = "feed"
+
+[params.blyg]
+  level = 1   # optional; see "Conformance level"
 ```
 
-and a `go.mod` requiring/replacing this module, and a content section
-(e.g. `content/blyg/_index.md`) whose own front matter opts into these
-output formats and defines the render/list behavior for its items:
+**3. A content section** (e.g. `content/blyg/_index.md`) whose own front
+matter opts into these output formats and defines the render/list
+behavior for its items:
 
 ```toml
 +++
@@ -66,17 +85,30 @@ outputs = ["blygmanifest", "blygfeed"]
 `outputs` is set here, per-page, rather than in the site's global
 `[outputs]` table — `[outputs] section = [...]` applies to *every*
 section (e.g. a site's `/blog/`, too), and this module's output formats
-have no business running there. The `content/llms.md` /
-`outputs = ['llms']` pattern already used elsewhere in a consuming site
-is the same idiom.
+have no business running there. The cascade is scoped to `kind = "page"`
+so the section page itself, which is where the surfaces are built, still
+renders.
+
+**4. A `<link rel="blyg">`** in every page's `<head>` (§12.1 step 4),
+pointing at the section, so resolving a page never depends on probing
+`/blyg/`:
+
+```gotemplate
+<link rel="blyg" href="{{ "blyg/" | absURL }}">
+```
+
+Then write an item (see "Content contract"), stamp it, build, and
+validate — see "Scripts" for running them from a site.
+
+### Why the output formats look like that
 
 **`blygmanifest`'s `isPlainText = true` is not optional.** Without it,
 Hugo runs the literal template text through `html/template`'s HTML
 escaper — which corrupts a leading `<?xml ...?>` prolog and any
 `<![CDATA[` marker even when the template contains no template actions
-at all. This bit us during development; it matches Hugo's own built-in
-JSON output format (`output.JSONFormat` in the Hugo source), which sets
-the same flag for the same reason.
+at all. It matches Hugo's own built-in JSON output format
+(`output.JSONFormat` in the Hugo source), which sets the same flag for
+the same reason.
 
 **`blygfeed` deliberately does not set it.** The escaping bug is real,
 but Hugo's own embedded `rss.xml` template (`tpl/tplimpl/embedded/
@@ -169,64 +201,55 @@ item document's `changelog` is rebuilt from the §5.2 members only
 SHA-256. The stamp script refuses any change to or deletion of a tracked
 file, because a published media URL MUST always serve the same bytes (§5.4).
 
-## The `resources.FromString` fan-out gotcha
-
-`items/index.json` and every `items/{id}.json` are one-file-per-item, not
-one-per-section, so they can't use Hugo's native "one output file per
-(page, output format)" mechanism the way `blyg.json`/`feed.xml` do.
-Instead they're published via
-`{{ $r := resources.FromString "blyg/items/x.json" $content }}` — but
-**that only actually writes the file once the resource is accessed**
-(e.g. `$r.RelPermalink`, `$r.Content`). Creating the resource and never
-touching it publishes nothing, silently. Every call site in this module
-does `{{ $_ := $r.RelPermalink }}` immediately after creating one, purely
-to force the write, discarding the value.
-
-## Absolute URLs in `content_html`
-
-The protocol requires `content_html` to be self-contained (§7). Render
-hooks on the markdown image/link AST aren't enough on their own if the
-consuming site has shortcodes that inject raw HTML with root-relative
-URLs outside those AST nodes entirely (a real case in the site this was
-built for — see its `docs/blyg/hazards.md`). `item.html` instead rewrites
-the *fully rendered* HTML string directly — in essence
-`(src|href|…)=(["'])/([^/"'])` → `${1}=${2}{base}/${3}`, using a captured
-"not another slash" character instead of a negative lookahead, because
-Hugo's regex engine (RE2) has none. The attribute list also covers
-`poster`, `cite`, `action` and friends, and two more passes handle every
-candidate inside `srcset` and `url(...)` in inline styles. This catches shortcode-injected markup and
-ordinary markdown images/links in one pass, so no render hooks are
-needed. Page-relative URLs (`other/page`) can't be rewritten — an item
-has no page of its own to be relative to — so
-`scripts/blyg_validate.py` fails the build on them, and on anything
-else the rewrite can't make self-contained.
-
-## Media
-
-`media` (§5.4) lists every object the rendered HTML embeds (`img`,
-`source`, `video`, `audio`: `src`, `poster`, `srcset`) from the origin's
-own `media/` directory, with a MIME type from the file extension and the
-`alt` text when there is one. Embedding anything else from the origin
-(e.g. `/img/…`) fails validation: only `media/` files are held
-immutable, and §5.4 requires that of a media URL.
-
 ## Scripts
 
-Python 3.11+, standard library only. Hugo ignores `scripts/`, `tests/`
-and `publish-from-issue/` — they aren't module mounts — so they ride
-along with the module without touching the build. Run the scripts from
-the consuming site's root: every default path (`content/blyg/`,
-`data/blyg/`, `public/`, `static/`) is relative to the working directory.
+Python 3.11+, standard library only. Hugo ignores `scripts/`, `tests/`,
+`docs/`, `exampleSite/` and `publish-from-issue/` — they aren't module
+mounts — so they ride along with the module without touching the build.
+Run the scripts from the consuming site's root: every default path
+(`content/blyg/`, `data/blyg/`, `public/`, `static/`) is relative to the
+working directory.
 
 - `scripts/blyg_stamp.py` assigns ids and maintains the ledger. Run it
   after adding or editing an item; `--check` fails if it would change
-  anything, which is the gate a site's CI runs before `hugo`.
+  anything, which is the gate a site's CI runs before `hugo`. `--amend`
+  compares against the ledger on the branch the site deploys from,
+  `--published-ref` (default `origin/master`; pass `origin/main` if that's
+  yours).
 - `scripts/blyg_validate.py` checks the built `public/blyg/` against the
   ledger and the spec; a site's CI runs it after `hugo`.
 - `scripts/blyg_from_issue.py` backs the action below.
 
-Tests: `python3 -m unittest discover -s modules/hugo-blyg/tests` (or
-`-s tests` from this directory).
+The scripts ship inside the module, so run the copy at the exact version
+the site's `go.mod` pins — the one its templates came from — rather than
+a separate checkout that can drift. Go knows where that is (and follows a
+local `replace`, too):
+
+```sh
+go mod download github.com/chrisbodhi/hugo-blyg
+BLYG=$(go list -m -f '{{.Dir}}' github.com/chrisbodhi/hugo-blyg)
+python3 "$BLYG/scripts/blyg_stamp.py"
+```
+
+In a site's CI, all three gates:
+
+```yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Locate hugo-blyg
+        run: |
+          go mod download github.com/chrisbodhi/hugo-blyg
+          echo "BLYG=$(go list -m -f '{{.Dir}}' github.com/chrisbodhi/hugo-blyg)" >> "$GITHUB_ENV"
+      - name: Check blyg content is stamped
+        run: python3 "$BLYG/scripts/blyg_stamp.py" --check
+      - name: Generate site
+        run: hugo --minify
+      - name: Validate blyg surface
+        run: python3 "$BLYG/scripts/blyg_validate.py"
+```
+
+GitHub's `ubuntu-latest` runners come with Go installed.
 
 ## The publish-from-issue action
 
@@ -264,7 +287,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: chrisbodhi/hugo-blyg/publish-from-issue@<ref>   # or ./modules/hugo-blyg/publish-from-issue in-repo
+      - uses: chrisbodhi/hugo-blyg/publish-from-issue@v0.1.0
         with:
           authors: someone, someone-else   # optional; the owner is always allowed
           label: blyg                      # optional
@@ -272,9 +295,55 @@ jobs:
           base-branch: main                # optional; defaults to the default branch
 ```
 
+Pin the same tag as the site's `go.mod`: the action stamps with its own
+copy of `blyg_stamp.py`, and the build checks that ledger with the
+templates from `go.mod`'s version.
+
 The repository must also allow Actions to open PRs (Settings → Actions →
 General → Workflow permissions → "Allow GitHub Actions to create and
 approve pull requests").
+
+## The `resources.FromString` fan-out gotcha
+
+`items/index.json` and every `items/{id}.json` are one-file-per-item, not
+one-per-section, so they can't use Hugo's native "one output file per
+(page, output format)" mechanism the way `blyg.json`/`feed.xml` do.
+Instead they're published via
+`{{ $r := resources.FromString "blyg/items/x.json" $content }}` — but
+**that only actually writes the file once the resource is accessed**
+(e.g. `$r.RelPermalink`, `$r.Content`). Creating the resource and never
+touching it publishes nothing, silently. Every call site in this module
+does `{{ $_ := $r.RelPermalink }}` immediately after creating one, purely
+to force the write, discarding the value.
+
+## Absolute URLs in `content_html`
+
+The protocol requires `content_html` to be self-contained (§7). Render
+hooks on the markdown image/link AST aren't enough on their own if the
+consuming site has shortcodes that inject raw HTML with root-relative
+URLs outside those AST nodes entirely (a real case in the site this was
+built for: an `<img>` whose `src` went through `relURL`, and an injected
+`<script src="/js/…">`). `item.html` instead rewrites
+the *fully rendered* HTML string directly — in essence
+`(src|href|…)=(["'])/([^/"'])` → `${1}=${2}{base}/${3}`, using a captured
+"not another slash" character instead of a negative lookahead, because
+Hugo's regex engine (RE2) has none. The attribute list also covers
+`poster`, `cite`, `action` and friends, and two more passes handle every
+candidate inside `srcset` and `url(...)` in inline styles. This catches
+shortcode-injected markup and ordinary markdown images/links in one pass, so no render hooks are
+needed. Page-relative URLs (`other/page`) can't be rewritten — an item
+has no page of its own to be relative to — so
+`scripts/blyg_validate.py` fails the build on them, and on anything
+else the rewrite can't make self-contained.
+
+## Media
+
+`media` (§5.4) lists every object the rendered HTML embeds (`img`,
+`source`, `video`, `audio`: `src`, `poster`, `srcset`) from the origin's
+own `media/` directory, with a MIME type from the file extension and the
+`alt` text when there is one. Embedding anything else from the origin
+(e.g. `/img/…`) fails validation: only `media/` files are held
+immutable, and §5.4 requires that of a media URL.
 
 ## Not yet built
 
@@ -285,3 +354,35 @@ resolve. Also not built: pinned per-version JSON files served from
 writes them; the templates don't read them back), the optional blogroll (§11), generation provenance (§5.7, only
 needed once a version involves generation), and any live HTML permalink
 page for an item (§8.4).
+
+## Developing hugo-blyg
+
+```sh
+python3 -m unittest discover -s tests          # script tests
+
+cd exampleSite                                 # the end-to-end gates
+python3 ../scripts/blyg_stamp.py --check
+hugo --minify
+python3 ../scripts/blyg_validate.py
+```
+
+`exampleSite/go.mod` replaces the module with this checkout, so it always
+builds what's in front of you. CI runs both, and also checks that an
+unstamped body edit fails `hugo`.
+
+To try a change against a real site before tagging it, point that site's
+`go.mod` at a local checkout — the same `go list` recipe under "Scripts"
+then finds the local scripts too — and drop the line before committing:
+
+```
+replace github.com/chrisbodhi/hugo-blyg => ../hugo-blyg
+```
+
+Releases are semver tags (`v0.1.0`, …); a site picks one up with
+`hugo mod get github.com/chrisbodhi/hugo-blyg@<tag>`, and bumps the
+publish-from-issue `uses:` ref to match.
+
+## License
+
+None chosen yet: the code is public to read, but no license has been
+granted to reuse it.

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# exampleSite build output
+exampleSite/public/
+exampleSite/resources/
+.hugo_build.lock
