@@ -97,6 +97,34 @@ pointing at the section, so resolving a page never depends on probing
 <link rel="blyg" href="{{ "blyg/" | absURL }}">
 ```
 
+**CORS.** Protocol v0.2 §4 (SHOULD): public JSON/XML responses SHOULD
+carry permissive CORS (`Access-Control-Allow-Origin: *`), since
+cross-origin reading by other clients depends on it. On Apache, this
+ships with the module as `static/blyg/.htaccess` — Hugo mounts an
+imported module's `static/` into the site by default, so nothing more
+is needed, and a site's own `static/blyg/.htaccess` still wins if it
+wants a different policy. Every other host needs the equivalent added
+on the site's own side, since `.htaccess` does nothing off Apache:
+
+- **Netlify / Cloudflare Pages** — a `_headers` file:
+  ```
+  /blyg/*.json
+    Access-Control-Allow-Origin: *
+  /blyg/*.xml
+    Access-Control-Allow-Origin: *
+  ```
+- **nginx** — in the `location` block serving `/blyg/`:
+  ```nginx
+  location /blyg/ {
+    location ~ \.(json|xml)$ {
+      add_header Access-Control-Allow-Origin "*";
+    }
+  }
+  ```
+- **S3 / CloudFront** — a CORS rule on the bucket (`AllowedOrigins: *`,
+  `AllowedMethods: GET`) or, for CloudFront, a response-headers policy
+  attached to the distribution/behavior serving `/blyg/*`.
+
 Then write an item (see "Content contract"), stamp it, build, and
 validate — see "Scripts" for running them from a site.
 

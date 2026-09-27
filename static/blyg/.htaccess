@@ -1,0 +1,14 @@
+# Blygger protocol v0.2 §4 (SHOULD): "Public JSON and XML responses
+# SHOULD be served with permissive CORS (Access-Control-Allow-Origin: *);
+# cross-origin reading by other clients depends on it."
+#
+# Ships with the hugo-blyg module (Hugo mounts an imported module's
+# static/ into the site by default) and covers every file this module
+# builds under /blyg/. A site's own static/blyg/.htaccess still wins --
+# project files override module files -- so a site can replace or drop
+# this. Apache only; see the README's "Setup" for other hosts.
+<IfModule mod_headers.c>
+  <FilesMatch "\.(json|xml)$">
+    Header set Access-Control-Allow-Origin "*"
+  </FilesMatch>
+</IfModule>
