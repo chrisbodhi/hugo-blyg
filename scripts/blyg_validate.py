@@ -538,7 +538,9 @@ def permalink(origin: str, blyg_id: str, kind: str) -> str:
 
 
 # The version line's data-* attributes: the channel the version stepper
-# (assets/blyg/version-nav.js) reads, which names versions.
+# (assets/blyg/version-nav.js) reads, which names versions. Only a
+# p.version-line's count: the script reads nothing else, and data-item in
+# particular is a common name for a theme's own attributes.
 VERSION_DATA = ("data-item", "data-live", "data-pins")
 
 
@@ -548,7 +550,7 @@ class _PageCollector(html.parser.HTMLParser):
         self.rels: dict[str, list[str]] = {}  # <link rel> -> hrefs
         self.hrefs: list[str] = []            # every href on the page
         self.anchors: list[str] = []          # the plain <a href> links among them
-        self.version_data: list[dict] = []    # each element's VERSION_DATA attributes
+        self.version_data: list[dict] = []    # each version line's VERSION_DATA attributes
         self.refresh: str | None = None
 
     def handle_starttag(self, tag, attrs):
@@ -560,7 +562,8 @@ class _PageCollector(html.parser.HTMLParser):
             self.hrefs.append(a["href"])
             if tag == "a":
                 self.anchors.append(a["href"])
-        if any(k in a for k in VERSION_DATA):
+        if ("version-line" in (a.get("class") or "").split()
+                and any(k in a for k in VERSION_DATA)):
             self.version_data.append({k: a.get(k) for k in VERSION_DATA})
         if tag == "meta" and (a.get("http-equiv") or "").lower() == "refresh":
             self.refresh = (a.get("content") or "").partition("url=")[2] or None

@@ -442,6 +442,13 @@ class PageTests(SurfaceTests):
         self.pages["index.html"] = page(ORIGIN, self.version_line(item=ID, live="v1"))
         self.assertTrue(any("not a version number" in p for p in self.problems()))
 
+    def test_data_attributes_outside_a_version_line_are_not_checked(self):
+        # The stepper reads only .version-line[data-item]; a theme's own
+        # data-item is none of the validator's business.
+        self.pages["index.html"] = page(
+            ORIGIN, '<nav data-item="menu" data-live="yes"></nav><p>Body.</p>')
+        self.assertEqual(self.problems(), [])
+
     def test_a_transclusions_data_attributes_are_not_the_version_line(self):
         # data-blyg-version is a wire token in content_html naming the
         # quoted fragment's version (§10.2), pinned or not.
