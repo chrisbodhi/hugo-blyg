@@ -1,0 +1,13 @@
+{{- /*
+  A pinned page's banner (.pinned-banner): which version this is, that
+  it's a frozen snapshot, and links to the live page and the version's
+  JSON twin -- the page is the human citation, the JSON the machine one
+  (§8.4 rule 3). It reads as frozen without a stylesheet.
+
+    {{ partial "blyg/view/pinned-banner.html" (dict "model" $m "pin" $pin) }}
+*/ -}}
+{{- $m := .model -}}
+{{- with .pin }}
+<p class="pinned-banner">Pinned v{{ .version }} — a frozen snapshot from {{ partial "blyg/view/date.html" .at }}.
+<a href="{{ $m.live }}">latest version</a> · <a href="{{ .json }}">citable JSON</a></p>
+{{- end -}}

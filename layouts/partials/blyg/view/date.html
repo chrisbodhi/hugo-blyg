@@ -1,0 +1,10 @@
+{{- /*
+  One date on a blyg page, as a <time> element. Takes an ISO 8601
+  timestamp from the ledger or a document; the date is spelled in the
+  site's own language (":date_long"). Override this one partial to change
+  how every blyg page writes a date.
+
+    {{ partial "blyg/view/date.html" $m.created }}
+*/ -}}
+<time datetime="{{ . }}">{{ (time.AsTime .).UTC | time.Format ":date_long" }}</time>
+{{- /* no newline after it: a date sits mid-sentence ("Most recent: …, v3") */ -}}

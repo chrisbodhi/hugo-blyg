@@ -1,0 +1,23 @@
+{{- /*
+  The feed page, /blyg/ (layouts/blyg/section.html): the 50 most
+  recently updated live items, newest first, one partials/blyg/view/
+  entry.html each, then the version stepper for the entries it can step
+  (a thread's card shows no body to swap).
+
+    {{ partial "blyg/view/feed.html" (dict "title" .Title "items" $models) }}
+*/ -}}
+<div class="blyg">
+<header>
+<h1>{{ .title }}</h1>
+</header>
+{{- range .items }}
+{{- partial "blyg/view/entry.html" . }}
+{{- else }}
+<p class="withdrawn">Nothing published yet.</p>
+{{- end }}
+</div>
+{{- $stepped := slice -}}
+{{- range .items -}}
+  {{- if not (and (eq .kind "thread") .live) -}}{{- $stepped = $stepped | append . -}}{{- end -}}
+{{- end -}}
+{{- partial "blyg/view/script.html" (dict "items" $stepped) -}}

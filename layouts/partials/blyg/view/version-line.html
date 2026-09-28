@@ -1,0 +1,30 @@
+{{- /*
+  The version line (p.version-line): the version shown, then the pin
+  citations as plain links -- "v3 · pinned: v1, v2". §8.4's floor, and all
+  a page offers without JavaScript: every version it names is the live one
+  or a pinned one, never unpinned history.
+
+    {{ partial "blyg/view/version-line.html" (dict "model" $m "stepper" true) }}
+    {{ partial "blyg/view/version-line.html" (dict "model" $m "pin" $pin) }}
+
+  With "pin", the line is a pinned page's: it shows that version, and says
+  in its text that it's frozen -- "v2 · frozen" -- so frozen reads without
+  a stylesheet, even when the pin is of the live version.
+
+  "stepper" adds the data-* attributes the version stepper reads
+  (assets/blyg/version-nav.js): a DOM-to-script channel only, never
+  published data, naming only the live version and the pins --
+  scripts/blyg_validate.py fails a page on which one names anything else.
+  They're never added on a pinned page, a withdrawn item's endcap, or a
+  site without pages, where the stepper doesn't run.
+*/ -}}
+{{- $m := .model -}}
+{{- $shown := $m.version -}}
+{{- with .pin }}{{ $shown = int .version }}{{ end -}}
+{{- $versions := slice -}}
+{{- range $m.pins -}}{{- $versions = $versions | append (int .version) -}}{{- end -}}
+<p class="version-line"
+{{- if and .stepper (not .pin) $m.pages (not $m.withdrawn) }} data-item="{{ $m.id }}" data-live="{{ $m.version }}" data-pins="{{ delimit $versions "," }}" data-mount="{{ $m.mount }}"{{ end -}}
+><span class="vlabel">v{{ $shown }}{{ if .pin }} · frozen{{ end }}</span>
+{{- with $m.pins }} · <span class="pins">pinned: {{ range $i, $p := . }}{{ if $i }}, {{ end }}<a href="{{ $p.page }}" title="frozen snapshot of v{{ $p.version }}">v{{ $p.version }}</a>{{ end }}</span>{{ end -}}
+</p>

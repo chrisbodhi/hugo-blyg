@@ -1,0 +1,36 @@
+{{- /*
+  A thread's own text, for its card on the feed page, as plain text:
+
+    {{ $text := partial "blyg/view/excerpt.html" $doc.content_html }}
+
+  "Own text" is everything before the thread's first transclusion: the
+  words that lead into the first thing it quotes. A baked
+  blockquote.blyg-transclusion is someone else's words -- flattened into
+  a plain-text excerpt it would lose the quotation marking and read as
+  the thread's own, which is exactly the disclosure §10.2 bakes the
+  wrapper to keep (css-contract §1: "styling is free; suppression is
+  not"). So the cut stops before it, whole, and the card's "read the
+  thread →" is where the quote is read. The text is then capped at 300
+  characters, like the reference client's cards, and ends in "…"
+  whenever anything was left out.
+
+  Plain text, because a cut through markup can leave it unbalanced (a
+  directive can sit inside a list item); the card is a pointer to the
+  thread, and the thread's page carries its content_html untouched. The
+  cut is at the wrapper exactly as partials/blyg/item.html bakes it, so a
+  blockquote of the author's own before it is kept, as ordinary text.
+*/ -}}
+{{- $limit := 300 -}}
+{{- $parts := split . `<blockquote class="blyg-transclusion"` -}}
+{{- $html := index $parts 0 -}}
+{{- $cut := gt (len $parts) 1 -}}
+{{- $html = replaceRE `(?is)<(script|style)\b.*?</(script|style)\s*>` " " $html -}}
+{{- /* Blocks end in a space, so "…end.</p><p>Next…" doesn't weld into "end.Next". */ -}}
+{{- $html = replaceRE `(?i)<br\b[^>]*>|</(p|div|li|dt|dd|h[1-6]|blockquote|pre|tr|td|th|figcaption|ul|ol|dl|table)\s*>` " " $html -}}
+{{- $text := trim (replaceRE `\s+` " " ($html | plainify | htmlUnescape)) " " -}}
+{{- if gt (strings.RuneCount $text) $limit -}}
+  {{- $text = substr $text 0 $limit | strings.TrimRight " " -}}
+  {{- $cut = true -}}
+{{- end -}}
+{{- if and $cut $text -}}{{- $text = printf "%s…" $text -}}{{- end -}}
+{{- return $text -}}

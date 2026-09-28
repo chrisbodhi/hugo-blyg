@@ -1,0 +1,58 @@
+{{- /*
+  Everything the view partials say about one item, gathered once from its
+  ledger entry and, for its live views, its item document:
+
+    {{ $m := partial "blyg/view/model.html" (dict "id" $id "entry" $entry "doc" $doc) }}
+
+  Returns a dict:
+
+    id, kind       the item's id and authored kind ("fragment" or
+                   "thread"), which a withdrawn item keeps
+    withdrawn      whether the live version is a withdrawal endcap
+    version        the live version
+    note           the live version's changelog note, or nil
+    created        when v1 was published
+    updated        when the live version was
+    doc            the item document (§5), when one was passed
+    origin, mount  the origin (…/blyg/), and the same without its slash
+    pages          whether the HTML pages are built ([params.blyg] pages)
+    live           the live permalink page, or "" with pages off
+    json           the item document's URL, items/{id}.json
+    pins           every pinned version, oldest first: the pin document
+                   (§8) plus "page", its pinned page -- or, with pages
+                   off, its JSON twin, the only thing there is to cite --
+                   and "json", that twin
+
+  Nothing here names an unpinned older version: the live version and the
+  pins are the only versions the pages may offer (§8.4).
+*/ -}}
+{{- $id := .id -}}
+{{- $entry := .entry -}}
+{{- $origin := printf "%s/blyg/" (strings.TrimSuffix "/" site.BaseURL) -}}
+{{- $pages := partial "blyg/pages-enabled.html" . -}}
+{{- $last := index $entry.changelog (sub (len $entry.changelog) 1) -}}
+{{- $pins := slice -}}
+{{- range partial "blyg/pins.html" (dict "id" $id "ledger" $entry) -}}
+  {{- $json := printf "%s%s" $origin (strings.TrimPrefix "blyg/" .path) -}}
+  {{- $page := $json -}}
+  {{- if $pages -}}
+    {{- $page = printf "%sv%d/" (partial "blyg/permalink.html" (dict "id" $id "kind" .kind "base" site.BaseURL)) (int .version) -}}
+  {{- end -}}
+  {{- $pins = $pins | append (merge . (dict "page" $page "json" $json)) -}}
+{{- end -}}
+{{- return dict
+    "id" $id
+    "kind" $entry.kind
+    "withdrawn" (eq $entry.withdrawn true)
+    "version" (int $entry.version)
+    "note" $last.note
+    "created" $entry.created
+    "updated" $last.at
+    "doc" .doc
+    "origin" $origin
+    "mount" (strings.TrimSuffix "/" $origin)
+    "pages" $pages
+    "live" (cond $pages (partial "blyg/permalink.html" (dict "id" $id "kind" $entry.kind "base" site.BaseURL)) "")
+    "json" (printf "%sitems/%s.json" $origin $id)
+    "pins" $pins
+-}}

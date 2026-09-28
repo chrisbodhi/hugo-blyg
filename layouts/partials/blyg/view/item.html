@@ -1,0 +1,26 @@
+{{- /*
+  An item's live permalink page (f/{id}/, t/{id}/), given its model
+  (partials/blyg/view/model.html): the live content_html, untouched, in
+  div.item-content, then the metadata block -- or, once the item is
+  withdrawn, the endcap (article.withdrawn), which still cites its pins,
+  since a pin survives withdrawal (§8), and runs no stepper.
+
+    {{ partial "blyg/view/item.html" $m }}
+*/ -}}
+{{- $m := . -}}
+<div class="blyg">
+{{- if $m.withdrawn }}
+<article class="fragment withdrawn">
+<p>This item was withdrawn.</p>
+{{- partial "blyg/view/meta.html" (dict "model" $m) }}
+</article>
+{{- else }}
+<article class="{{ $m.kind }}">
+<div class="item-content">
+{{ $m.doc.content_html | safeHTML }}
+</div>
+{{- partial "blyg/view/meta.html" (dict "model" $m "stepper" true) }}
+</article>
+{{- end }}
+</div>
+{{- partial "blyg/view/script.html" (dict "items" (slice $m)) -}}

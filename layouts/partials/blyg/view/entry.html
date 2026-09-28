@@ -1,0 +1,30 @@
+{{- /*
+  One item on the feed page (/blyg/), given its model
+  (partials/blyg/view/model.html):
+
+    {{ partial "blyg/view/entry.html" $m }}
+
+  A fragment shows in full: article.fragment, its content_html untouched
+  in div.item-content, then its metadata block. A thread is cut short to
+  a card of its own text (partials/blyg/view/excerpt.html) behind an
+  italic "thread" label (.kind-chip), linking its page -- the reference
+  client's article.fragment.thread-card, class for class, so a theme
+  written against it styles this one too. On a site without pages there's
+  no thread page to send a reader to, so a thread shows in full, as
+  article.thread.
+*/ -}}
+{{- $m := . -}}
+{{- if and (eq $m.kind "thread") $m.live }}
+<article class="fragment thread-card">
+<p><i class="kind-chip">thread</i>{{ with partial "blyg/view/excerpt.html" $m.doc.content_html }} {{ . }}{{ end }}</p>
+<p><a href="{{ $m.live }}">read the thread →</a></p>
+{{- partial "blyg/view/meta.html" (dict "model" $m "stepper" true) }}
+</article>
+{{- else }}
+<article class="{{ $m.kind }}">
+<div class="item-content">
+{{ $m.doc.content_html | safeHTML }}
+</div>
+{{- partial "blyg/view/meta.html" (dict "model" $m "stepper" true) }}
+</article>
+{{- end -}}
