@@ -1,0 +1,21 @@
+{{- /*
+  Marks a machine-generated span (§5.7), and renders it wrapped in the
+  permanent wire token blyg-tk-gen: a <div> for a block span (each marker
+  alone on its own line, so .Inner starts with a newline), a <span> for an
+  inline one (both markers on one line).
+
+    {{< blyg-gen sources="id, id@vN" model="…" at="2026-09-01T12:00:00Z" >}}
+    …generated text…
+    {{< /blyg-gen >}}
+
+  The markers never reach content_md: partials/blyg/content-md.html strips
+  them, and scripts/blyg_stamp.py records the parameters as the version's
+  `generated` provenance, with each source pinned to the exact version it
+  names. That's also where the markup rules are enforced -- this renders
+  what the stamp script accepted.
+*/ -}}
+{{- if hasPrefix .Inner "\n" -}}
+<div class="blyg-tk-gen">{{ .Inner | .Page.RenderString (dict "display" "block") }}</div>
+{{- else -}}
+<span class="blyg-tk-gen">{{ .Inner | .Page.RenderString }}</span>
+{{- end -}}

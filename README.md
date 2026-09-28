@@ -185,9 +185,10 @@ who's read Hugo's own RSS template will already expect to see.
   (§10.3). Any other value, including `"withdrawn"`, fails the build:
   `"withdrawn"` is a wire-level state this module derives from the
   ledger, never something a page authors directly.
-- The body's SHA-256 must equal the ledger's `last_hash`, or the build
-  fails. Shipping an unstamped edit would be a same-version stealth
-  edit (§13.3).
+- The SHA-256 of `content_md` — the body, minus any `blyg-gen` markers
+  (see "Generation provenance") — must equal the ledger's `last_hash`,
+  or the build fails. Shipping an unstamped edit would be a
+  same-version stealth edit (§13.3).
 - `draft = true`, a future `date`/`publishDate`, or an `expiryDate`
   would each make Hugo drop the page. Before an item is first stamped
   that just means "not published yet"; after, it would 404 a published
@@ -216,14 +217,17 @@ only applies to versions that involved generation.
 
 `data/blyg/ledger.json`, keyed by id, one entry per item:
 `{path, created, version, kind, last_hash, withdrawn, changelog,
-transclusions?}`, where each changelog entry is `{version, at, note, kind,
-pinned?}`, and `transclusions` (threads with directives only) holds the
-snapshots baked into the thread's latest version — see "Transclusion". Produced
+transclusions?, generated?}`, where each changelog entry is `{version, at,
+note, kind, pinned?}`, `transclusions` (threads with directives only) holds the
+snapshots baked into the thread's latest version — see "Transclusion" —
+and `generated` (versions with generated spans only) holds their
+provenance — see "Generation provenance". Produced
 and maintained by `scripts/blyg_stamp.py` — the templates
 only read it, via `site.Data.blyg.ledger` (Hugo's standard
 `data/<path>` → `site.Data.<path>` mapping). `content_hash` in the item
-document is the ledger's `last_hash`; the build re-hashes `.RawContent`
-and fails on any mismatch rather than trusting the two to agree.
+document is the ledger's `last_hash`; the build re-hashes `content_md`
+(`.RawContent` minus any `blyg-gen` markers) and fails on any mismatch
+rather than trusting the two to agree.
 
 The per-changelog `kind` is ledger-private: it lets `feed.xml` label
 every past publish event with the kind that version really had (an
@@ -538,12 +542,61 @@ page, once served, MUST keep returning 200 (§8.4 rule 1). The module
 owns `/blyg/index.html`, so don't add `"html"` to the section's
 `outputs` as well.
 
+## Generation provenance
+
+A version containing machine-generated prose SHOULD say so (§5.7): a
+`generated` array on the item document, one entry per generated span,
+and each span wrapped in `content_html` as `blyg-tk-gen`. The protocol
+also requires that `content_md` carry no markup for it at all, so the
+spans are marked in the source with this module's shortcode, whose
+markers never reach the wire:
+
+```md
+Written by hand, with {{< blyg-gen model="some-model" >}}a generated phrase{{< /blyg-gen >}} inline.
+
+{{< blyg-gen sources="5cx94j6wbmzrdnnjxvs9j1nkba, 7c9wk2mhq0v3xj8tn5rzfd41bg@v2" model="some-model" at="2026-09-04T11:30:00Z" >}}
+A generated paragraph.
+{{< /blyg-gen >}}
+```
+
+- **Inline** spans open and close on one line and render as
+  `<span class="blyg-tk-gen">`. **Block** spans put each marker alone on
+  its own line, with a blank line before the opening marker and after the
+  closing one, and render as `<div class="blyg-tk-gen">`. The blank lines
+  matter: `content_md` is the body with the marker lines removed, and
+  without them the span would read as part of its neighbours' paragraphs.
+- **Parameters**, all optional and all double-quoted: `sources` (a
+  comma-separated list of this origin's item ids, each optionally
+  `@vN`), `model`, and `at` (ISO 8601 UTC). Nothing else is accepted,
+  since the array MUST NOT carry instructions or other authoring state
+  (§5.7 rule 2).
+- **Sources are pinned at publish time.** A bare id means the source's
+  latest version published *before* this stamp run; content generated
+  from a draft wasn't drawn from anything published. `id@vN` names an
+  exact published version, and is required for an item's own earlier
+  versions and for a source that is withdrawn now. As with transclusion,
+  an unchanged item keeps its recorded sources whatever they do later;
+  republishing it re-resolves bare ids.
+- **Provenance is part of the version.** Changing only a parameter
+  changes the item document but not `content_md`, so the stamp script
+  treats it as a new version, and the build fails if the body's markers
+  disagree with the ledger.
+- Spans don't nest, can't be empty, and can't contain a transclusion
+  directive: quotation is transclusion's alone (§5.7 rule 3). A thread
+  quoting a fragment that has generated spans bakes them along with the
+  quote, but lists nothing in its own `generated`; that provenance is
+  the fragment version's.
+- A withdrawal endcap carries no `generated`, and a pin carries its
+  version's (§5.7 rules 4 and 5).
+
+The markers count everywhere Hugo expands shortcodes, code fences
+included. To write one literally, use Hugo's escaped form,
+`{{</* blyg-gen */>}}`.
+
 ## Not yet built
 
-Not built: generation provenance (§5.7). It's only needed once a
-version involves generation, and it needs an authoring convention first:
-`content_md` must carry no markers at all, while `content_html` must
-wrap each generated span as `blyg-tk-gen`.
+Nothing on the 0.2 publish side. L2's constructs (stub metadata, thread
+nesting, `forked_from`, webmention) arrive with protocol 0.3.
 
 ## Developing hugo-blyg
 

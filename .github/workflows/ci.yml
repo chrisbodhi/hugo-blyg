@@ -52,8 +52,21 @@ jobs:
       - name: Pinned pages stay frozen
         run: ../tests/pages_e2e.sh
 
-      # And the build gate itself: an unstamped body edit must fail hugo,
-      # not ship as a same-version stealth edit (§13.3).
+      # And the build gate itself. A blyg-gen parameter isn't part of
+      # content_md, so the hash can't see it; the build still refuses to
+      # ship provenance the ledger never recorded (§5.7).
+      - name: Unstamped generation provenance fails the build
+        run: |
+          sed -i 's/model="example-model-1" >}}one/model="another-model" >}}one/' \
+            content/blyg/2026-09-04-generated-fragment.md
+          if hugo --minify; then
+            echo "::error::hugo built unstamped generation provenance"
+            exit 1
+          fi
+          git checkout -- content
+
+      # An unstamped body edit must fail hugo, not ship as a same-version
+      # stealth edit (§13.3).
       - name: Unstamped edit fails the build
         run: |
           echo "An unstamped edit." >> content/blyg/2026-09-02-first-thread.md

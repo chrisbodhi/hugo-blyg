@@ -65,12 +65,25 @@ class _HTMLCollector(html.parser.HTMLParser):
         self.refs: list[tuple[str, str, str]] = []  # (tag, attr, url)
         # (data-blyg-id, data-blyg-version) of every §10.2 wrapper, in order
         self.transclusions: list[tuple[str | None, str | None]] = []
+        # blyg-tk-gen wrappers (§5.7) outside any transclusion: this
+        # version's own generated spans, not ones quoted with a fragment
+        self.generated = 0
+        self._blockquotes: list[bool] = []  # open <blockquote>s: a transclusion?
+
+    def handle_endtag(self, tag):
+        if tag == "blockquote" and self._blockquotes:
+            self._blockquotes.pop()
 
     def handle_starttag(self, tag, attrs):
+        classes = (dict(attrs).get("class") or "").split()
         if tag == "blockquote":
             a = dict(attrs)
-            if "blyg-transclusion" in (a.get("class") or "").split():
+            quoted = "blyg-transclusion" in classes
+            self._blockquotes.append(quoted)
+            if quoted:
                 self.transclusions.append((a.get("data-blyg-id"), a.get("data-blyg-version")))
+        if tag in ("span", "div") and "blyg-tk-gen" in classes and not any(self._blockquotes):
+            self.generated += 1
         for name, value in attrs:
             if value is None:
                 continue
@@ -207,7 +220,54 @@ def check_blogroll(public_blyg: Path, manifest: dict, problems: Problems) -> Non
                 problems.add(w, f"{attr} {o.get(attr)!r} isn't an absolute http(s) URL (§11)")
 
 
-def check_item(blyg_id: str, entry: dict, origin: str, public_blyg: Path,
+def wire_generated(recorded: list[dict]) -> list[dict]:
+    """The item document's `generated` from the ledger's: the §5.7 members
+    only (the authored parameters are ledger-private)."""
+    return [{k: g[k] for k in ("sources", "model", "at") if k in g} for g in recorded]
+
+
+def check_generated(where: str, generated, ledger: dict, problems: Problems) -> None:
+    """§5.7: a non-empty array, one entry per generated span, each naming
+    exact published versions of this origin's items as `sources`, with
+    optional model and at -- and nothing else, since the array MUST NOT
+    carry instruction text or other authoring state."""
+    if not isinstance(generated, list) or not generated:
+        problems.add(where, "generated is omitted entirely when a version involved no "
+                            "generation, never empty (§5.7 rule 4)")
+        return
+    for n, g in enumerate(generated, start=1):
+        w = f"{where} generated[{n}]"
+        if not isinstance(g, dict):
+            problems.add(w, "must be an object")
+            continue
+        extra = sorted(set(g) - {"sources", "model", "at"})
+        if extra:
+            problems.add(w, f"carries {extra} -- only sources, model and at: no "
+                            f"instruction text or other authoring state (§5.7 rule 2)")
+        if "model" in g and not (isinstance(g["model"], str) and g["model"]):
+            problems.add(w, "model must be a non-empty string")
+        if "at" in g and not is_iso_z(g["at"]):
+            problems.add(w, f"at {g['at']!r} isn't ISO 8601 UTC (§4)")
+        sources = g.get("sources")
+        if not isinstance(sources, list):
+            problems.add(w, "sources must be an array (possibly empty) (§5.7 rule 1)")
+            continue
+        for src in sources:
+            sid = src.get("id") if isinstance(src, dict) else None
+            version = src.get("version") if isinstance(src, dict) else None
+            if not isinstance(src, dict) or set(src) != {"id", "version"}:
+                problems.add(w, f"source {src!r} must be exactly {{id, version}}")
+                continue
+            changelog = (ledger.get(sid) or {}).get("changelog", [])
+            if not isinstance(version, int) or not 1 <= version <= len(changelog):
+                problems.add(w, f"source {sid} v{version} isn't a version this origin "
+                                f"published (§5.7 rule 1)")
+            elif changelog[version - 1].get("kind") == "withdrawn":
+                problems.add(w, f"source {sid} v{version} is a withdrawal endcap, with no "
+                                f"content to draw on")
+
+
+def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg: Path,
                problems: Problems) -> dict | None:
     where = f"items/{blyg_id}.json"
     path = public_blyg / "items" / f"{blyg_id}.json"
@@ -226,9 +286,8 @@ def check_item(blyg_id: str, entry: dict, origin: str, public_blyg: Path,
         problems.add(where, f"id {doc.get('id')!r} doesn't match file name / isn't a blyg id")
     if doc.get("origin") != origin:
         problems.add(where, f"origin {doc.get('origin')!r} != manifest site {origin!r}")
-    for reserved in ("forked_from", "generated"):
-        if reserved in doc:
-            problems.add(where, f"carries {reserved!r}, which this publisher never emits (§5.6/§5.7)")
+    if "forked_from" in doc:
+        problems.add(where, "carries 'forked_from', reserved for L2 (§5.6)")
 
     kind = doc.get("kind")
     withdrawn = bool(entry.get("withdrawn"))
@@ -288,10 +347,21 @@ def check_item(blyg_id: str, entry: dict, origin: str, public_blyg: Path,
     if not isinstance(media, list):
         problems.add(where, "media must be an array")
         media = []
+    recorded = [] if withdrawn else wire_generated(entry.get("generated", []))
+    if "generated" in doc:
+        check_generated(where, doc["generated"], ledger, problems)
+    if doc.get("generated", []) != recorded:
+        problems.add(where, f"generated {doc.get('generated')!r} != the ledger's "
+                            f"{recorded!r} (§5.7)")
     if withdrawn:
         if content_md or content_html or media:
             problems.add(where, "withdrawal endcap MUST have empty content_md/content_html and media [] (§9)")
+        if "generated" in doc:
+            problems.add(where, "a withdrawal endcap never carries generated (§5.7 rule 4, §9)")
         return doc
+    if bs.GEN_ANY_RE.search(content_md):
+        problems.add(where, "content_md carries blyg-gen markers -- the published "
+                            "markdown carries no authoring markup (§5.7)")
 
     directives = [(lineno, line, bs.DIRECTIVE_RE.match(line).group(1))
                   for lineno, line, _ in bs.find_directives(content_md)]
@@ -304,7 +374,12 @@ def check_item(blyg_id: str, entry: dict, origin: str, public_blyg: Path,
                             f"transclusions {[t['id'] for t in baked]} -- every directive "
                             f"MUST resolve, in directive order (§10.2, §10.3)")
     check_content_html(where, content_html, origin, public_blyg, problems)
-    wrappers = _collect(content_html).transclusions
+    collected = _collect(content_html)
+    if collected.generated != len(doc.get("generated", [])):
+        problems.add(where, f"content_html wraps {collected.generated} generated span(s) as "
+                            f"blyg-tk-gen, but generated lists {len(doc.get('generated', []))} "
+                            f"-- one entry per span (§5.7)")
+    wrappers = collected.transclusions
     want = [(t["id"], str(t["version"])) for t in baked]
     if is_thread and wrappers != want:
         problems.add(where, f"content_html bakes {wrappers} but transclusions says {want} -- "
@@ -446,6 +521,9 @@ def check_pins(public_blyg: Path, ledger: dict, origin: str, problems: Problems)
                     problems.add(where, "origin != manifest site")
                 if "media" in doc:
                     problems.add(where, "pinned documents carry no media array (§8 rule 4)")
+                if "generated" in doc:
+                    # §5.7 rule 5: a pinned version carries its own provenance.
+                    check_generated(where, doc["generated"], ledger, problems)
     for blyg_id, entry in ledger.items():
         for c in entry["changelog"]:
             if c.get("pinned") and (blyg_id, c["version"]) not in served:
@@ -699,7 +777,7 @@ def validate(public_dir: Path, ledger_path: Path) -> Problems:
 
     docs = {}
     for blyg_id, entry in sorted(ledger.items()):
-        doc = check_item(blyg_id, entry, origin, public_blyg, problems)
+        doc = check_item(blyg_id, entry, ledger, origin, public_blyg, problems)
         if doc is not None:
             docs[blyg_id] = doc
     items_dir = public_blyg / "items"

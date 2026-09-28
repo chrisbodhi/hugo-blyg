@@ -250,6 +250,56 @@ class SurfaceTests(unittest.TestCase):
         self.assertTrue(any("xmlUrl" in p for p in self.problems()))
 
 
+class GeneratedTests(SurfaceTests):
+    """Generation provenance (§5.7) on the item document."""
+
+    def generated(self, html='<p>A <span class="blyg-tk-gen">generated</span> bit.</p>',
+                  wire=None):
+        g = {"sources": [{"id": ID, "version": 1}], "model": "m"}
+        self.ledger[ID]["version"] = 2
+        self.ledger[ID]["changelog"].append(
+            {"version": 2, "at": "2026-01-02T00:00:00Z", "note": None, "kind": "thread"})
+        self.ledger[ID]["generated"] = [dict(g, authored={"sources": ID, "model": "m"})]
+        self.docs[ID] = item_doc(ID, version=2, html=html)
+        self.docs[ID]["generated"] = [g] if wire is None else wire
+
+    def test_generated_passes(self):
+        self.generated()
+        self.assertEqual(self.problems(), [])
+
+    def test_generated_needs_one_wrapper_per_span(self):
+        self.generated(html="<p>A generated bit.</p>")
+        self.assertTrue(any("one entry per span" in p for p in self.problems()))
+
+    def test_generated_carries_no_authoring_state(self):
+        self.generated(wire=[{"sources": [], "model": "m", "prompt": "write it"}])
+        self.assertTrue(any("instruction text" in p for p in self.problems()))
+
+    def test_generated_is_omitted_rather_than_empty(self):
+        self.generated(html="<p>Body.</p>", wire=[])
+        self.ledger[ID].pop("generated")
+        self.assertTrue(any("never empty" in p for p in self.problems()))
+
+    def test_generated_source_must_be_a_published_version(self):
+        self.generated(wire=[{"sources": [{"id": ID, "version": 7}], "model": "m"}])
+        self.assertTrue(any("isn't a version this origin published" in p
+                            for p in self.problems()))
+
+    def test_content_md_carries_no_markers(self):
+        body = 'A {{< blyg-gen >}}b{{< /blyg-gen >}}.\n'
+        self.docs[ID] = item_doc(ID, body=body)
+        self.ledger[ID]["last_hash"] = bs.content_hash(body)
+        self.assertTrue(any("blyg-gen markers" in p for p in self.problems()))
+
+    def test_endcap_carries_no_generated(self):
+        self.ledger[ID].update(version=2, withdrawn=True, last_hash=bs.EMPTY_CONTENT_HASH)
+        self.ledger[ID]["changelog"].append(
+            {"version": 2, "at": "2026-01-02T00:00:00Z", "note": "withdrawn", "kind": "withdrawn"})
+        self.docs[ID] = item_doc(ID, version=2, withdrawn=True)
+        self.docs[ID]["generated"] = [{"sources": []}]
+        self.assertTrue(any("never carries generated" in p for p in self.problems()))
+
+
 def page(canonical, body="", links=()):
     return (f'<!doctype html><html><head><link rel="canonical" href="{canonical}">'
             f'<link rel="blyg" href="{ORIGIN}"></head><body>{body}'

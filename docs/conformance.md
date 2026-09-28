@@ -31,9 +31,9 @@ non-multiplayer origin. Every item authors its `kind` via
 `blyg_kind` in front matter (`"fragment"` or `"thread"`; defaults to
 `"thread"`), and threads resolve `![[id]]` directives against the
 site's own fragments at publish time (§10). A site that writes
-`data/blyg/blogroll.json` serves a blogroll (§11). Generation provenance
-(§5.7) is not exercised yet, so its rules are listed for completeness
-but not load-bearing today.
+`data/blyg/blogroll.json` serves a blogroll (§11). Generated spans are
+marked with the module's `blyg-gen` shortcode and disclosed as
+`generated` (§5.7).
 
 ## §4 — The publication surface
 
@@ -80,7 +80,8 @@ but not load-bearing today.
       **only** — never `author`, media bytes, or `content_html`.
       *(Verified empirically: Hugo 0.151's `.RawContent` reproduces the
       file's post-front-matter bytes exactly, including leading/trailing
-      newlines and a missing final newline — safe to hash directly.)*
+      newlines and a missing final newline — safe to hash, once any
+      `blyg-gen` markers are stripped (§5.7 below).)*
 - [ ] `version` MUST be a positive integer, incremented by exactly 1 per
       publish event. Draft saves are invisible to the protocol. By default
       every stamp run that changes something bumps, which can only
@@ -120,14 +121,43 @@ but not load-bearing today.
       clients that store/re-emit item JSON MUST carry it verbatim, never
       synthesized or rewritten.
 - [ ] `"forked_from"` MUST NOT be emitted at 0.2 (reserved for L2/0.3).
-- [ ] The `generated` array, if used: MUST NOT carry instruction text or
-      other pre-generation authoring state; is omitted entirely when a
-      version involved no generation; a withdrawal endcap MUST NOT carry
-      it. (Not built yet — no generation-provenance workflow in scope.)
-- [ ] If `generated` is used, the renderer MUST wrap each generated span
-      in `content_html` as `<span class="blyg-tk-gen">…</span>` (inline)
-      or `<div class="blyg-tk-gen">…</div>` (block) — a permanent wire
-      token, never renamed.
+- [ ] `content_md` carries no authoring markup: generated spans are
+      marked in the source with `{{< blyg-gen >}}…{{< /blyg-gen >}}`,
+      whose markers `blyg_stamp.py` (`strip_gen_markers`) and the build
+      (`partials/blyg/content-md.html`) strip by the same line-for-line
+      rule before hashing. A block span must stand between blank lines,
+      so its stripped text stays its own paragraphs. `blyg_validate.py`
+      fails any `content_md` still carrying a marker.
+- [ ] The `generated` array: one entry per span, in document order, of
+      `sources` (`{id, version}` — exact published versions of this
+      origin's items, possibly none), `model` and `at` (§5.7 rule 1).
+      Sources are pinned at publish time and stored in the ledger, so a
+      source's later edits never reach an unchanged version; a bare id
+      resolves to the source's latest version published before the stamp
+      run.
+- [ ] MUST NOT carry instruction text or other pre-generation authoring
+      state (rule 2): `blyg-gen` takes only `sources`, `model`, `at`, and
+      the validator refuses any other member.
+- [ ] A source is not a transclusion (rule 3): a directive inside a
+      generated block is refused, and a thread quoting a fragment with
+      generated spans lists none of them in its own `generated` — the
+      validator counts only `blyg-tk-gen` wrappers outside transclusion
+      blockquotes against it.
+- [ ] Omitted entirely when a version involved no generation, never
+      emitted empty; a withdrawal endcap never carries it (rule 4).
+- [ ] Pinned version files carry the pinned version's `generated`
+      (rule 5; `build_pin_document`).
+- [ ] The provenance is part of the version: a changed `blyg-gen`
+      parameter is a new version even though `content_md` doesn't change,
+      and the build fails if the body's markers disagree with the ledger.
+- [ ] The renderer wraps each generated span in `content_html` as
+      `<span class="blyg-tk-gen">…</span>` (inline: both markers on one
+      line) or `<div class="blyg-tk-gen">…</div>` (block) — a permanent
+      wire token, never renamed. The module's `blyg-gen` shortcode does
+      this, and leaves the class unstyled. *(Verified against Hugo
+      0.151.0: a block span's `<div>` isn't wrapped in `<p>`, and
+      `.RenderString` — the transclusion path — renders it byte-identically
+      to `.Content`.)*
 
 ## §6 — Manifest and archive index
 
@@ -262,7 +292,8 @@ but not load-bearing today.
       `"kind": "withdrawn"`, `updated` set, changelog retained plus the
       endcap entry.
 - [ ] For threads, the endcap also empties `transclusions` to `[]`.
-- [ ] An endcap never carries a `generated` array.
+- [ ] An endcap never carries a `generated` array (the stamp script drops
+      it from the ledger; the validator refuses it on the wire).
 - [ ] The item document stays 200 forever; pinned versions remain
       fetchable forever.
 - [ ] Withdrawal is reversible: a later publish event (vN+1, with the
