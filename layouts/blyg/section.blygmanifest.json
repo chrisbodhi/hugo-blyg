@@ -86,11 +86,18 @@
   "generator" "hugo-blyg/0.1.0"
   "site" (printf "%sblyg/" $base)
   "title" site.Title
-  "author" (dict "name" site.Params.author)
   "feed" "feed.xml"
   "items" "items/index.json"
   "updated" $updated
 -}}
+{{- /*
+  §6.1: the publication identity, OPTIONAL. Only asserted when the site
+  names one -- an absent params.author means no assertion, not a
+  {"name": null} one.
+*/ -}}
+{{- with site.Params.author -}}
+  {{- $manifest = merge $manifest (dict "author" (dict "name" .)) -}}
+{{- end -}}
 {{- /* §6.1/§11: the key is present only while a non-empty blogroll is served. */ -}}
 {{- with partial "blyg/blogroll.html" . -}}
   {{- $manifest = merge $manifest (dict "blogroll" .) -}}

@@ -199,6 +199,10 @@ class SurfaceTests(unittest.TestCase):
         self.docs[ID]["changelog"][0]["pinned"] = True
         self.assertTrue(any("pin" in p for p in self.problems()))
 
+    def test_manifest_author_without_a_name_fails(self):
+        self.manifest_extra = {"author": {"name": None}}
+        self.assertTrue(any("author.name" in p for p in self.problems()))
+
     def blogroll(self, *outlines, key="blogroll.opml"):
         self.manifest_extra = {"blogroll": key}
         (self.blyg / "blogroll.opml").write_text(

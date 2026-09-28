@@ -150,8 +150,13 @@ def check_manifest(public_blyg: Path, problems: Problems) -> dict | None:
         problems.add("blyg.json", "site must be the origin base URL, ending in /")
     if not is_iso_z(manifest.get("updated")):
         problems.add("blyg.json", f"updated {manifest.get('updated')!r} is not ISO 8601 UTC")
-    if "author" in manifest and not isinstance(manifest["author"], dict):
-        problems.add("blyg.json", "author must be an object")
+    if "author" in manifest:
+        author = manifest["author"]
+        if not isinstance(author, dict):
+            problems.add("blyg.json", "author must be an object (§6.1)")
+        elif "name" in author and not (isinstance(author["name"], str) and author["name"]):
+            problems.add("blyg.json", f"author.name is {author['name']!r}; omit author "
+                                      f"rather than assert an empty one (§6.1)")
     return manifest
 
 
