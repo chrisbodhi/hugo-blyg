@@ -87,7 +87,7 @@
 {{- $manifest := dict
   "blyg" "0.2"
   "level" $level
-  "generator" "hugo-blyg/0.1.0"
+  "generator" "hugo-blyg/0.2.0"
   "site" (printf "%sblyg/" $base)
   "title" site.Title
   "feed" "feed.xml"
