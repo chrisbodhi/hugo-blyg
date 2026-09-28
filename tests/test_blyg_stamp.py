@@ -589,6 +589,17 @@ class TransclusionDirectiveTests(StampHelpers):
             self.stamp()
         self.assertFalse(self.ledger_path.exists())
 
+    def test_backtick_in_a_backtick_info_string_opens_no_fence(self):
+        # "```a`b" is a paragraph with inline code to CommonMark, so the
+        # directive after it is live and MUST resolve (issue #7).
+        write_post(self.content_dir, "t.md", FM, f"```a`b\n\n![[{self.ID}]]\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "MUST resolve"):
+            self.stamp()
+
+    def test_backtick_in_a_tilde_info_string_still_opens_a_fence(self):
+        write_post(self.content_dir, "t.md", FM, f"~~~a`b\n![[{self.ID}]]\n~~~\n")
+        self.assertEqual(self.stamp()[0].kind, "new")
+
     def test_withdrawn_items_are_not_scanned(self):
         blyg_id = self.first()
         self.edit("post.md", "draft = false", "draft = false\nblyg_withdrawn = true")

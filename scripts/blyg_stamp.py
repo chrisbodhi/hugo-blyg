@@ -57,6 +57,8 @@ FRONT_MATTER_OPEN = "+++\n"
 # is reserved and MUST be rejected at publish time. Anything else that
 # merely looks similar is inert text.
 DIRECTIVE_RE = re.compile(r"^\s*!\[\[(" + BLYG_ID_RE_SRC + r")(@v[0-9]+)?\]\]\s*$")
+# A fence line: the fence and whatever follows it (an opener's info
+# string). find_directives applies the rest of CommonMark's rule.
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
@@ -120,7 +122,10 @@ def find_directives(body: str) -> list[tuple[int, str, bool]]:
     for lineno, line in enumerate(body.split("\n"), start=1):
         m = FENCE_RE.match(line)
         if fence is None:
-            if m:
+            # CommonMark: a backtick fence's info string may not contain a
+            # backtick -- "```a`b" is a paragraph with inline code, so the
+            # lines after it are live, not fenced (issue #7).
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
                 fence = m.group(1)
                 continue
         else:
