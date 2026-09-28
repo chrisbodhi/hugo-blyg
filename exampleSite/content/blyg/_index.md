@@ -1,6 +1,6 @@
 +++
 title = "blyg"
-outputs = ["blygmanifest", "blygfeed"]
+outputs = ["html", "blygmanifest", "blygfeed"]   # "html": the feed page, at /blyg/
 
 # Hugo renders no page of its own for an item: hugo-blyg writes each
 # item's HTML at its id-based permalink (f/{id}/, t/{id}/) itself, next

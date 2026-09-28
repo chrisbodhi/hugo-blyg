@@ -65,8 +65,11 @@ marked with the module's `blyg-gen` shortcode and disclosed as
       Apache, the site must add the equivalent itself — see the README's
       "Setup" for Netlify/Cloudflare Pages, nginx, and S3/CloudFront.
 - [ ] (SHOULD) Human-readable HTML — a feed page and item permalink
-      pages — written by `partials/blyg/pages.html` at `index.html`,
-      `f/{id}/` and `t/{id}/` (on unless `[params.blyg] pages = false`).
+      pages — as ordinary pages of the site, rendered inside its own
+      `baseof.html`: the feed page is the section's `"html"` output
+      (`layouts/blyg/section.html`), and the item and pinned pages come
+      from the module's content adapter (`content/blyg/_content.gotmpl`),
+      built but never listed (on unless `[params.blyg] pages = false`).
       Presentation, not protocol, except where §8.4 says otherwise (below).
 
 ## §5 — The item document (`items/{id}.json`)
@@ -268,18 +271,21 @@ marked with the module's `blyg-gen` shortcode and disclosed as
       the built pins.
 - [ ] Pinned pages (§8.4, MAY; served with the item pages) at
       `f/{id}/v{n}/` or `t/{id}/v{n}/` by the kind that version had:
-      - gated exactly like the JSON file — written only for the ledger's
+      - gated exactly like the JSON file — added only for the ledger's
         pins, so 404 otherwise, and 200 for as long as the pin file is
         there, which the build enforces (rule 1). `blyg_validate.py`
         checks both directions. A site that turns pages off after serving
         a pinned one breaks this; the README says so.
-      - content is that version's publish-time `content_html`, verbatim,
-        taken from the pin file rather than re-rendered, and not touched
-        by `hugo --minify` (resources.FromString output isn't minified,
-        checked against Hugo 0.151.0). `blyg_validate.py` checks the page
-        carries the pin's `content_html` byte for byte (rule 2).
-      - `rel="canonical"` to the live permalink, a visible frozen-snapshot
-        banner, and a link to the `v{n}.json` twin (rule 3, SHOULD).
+      - content is that version's publish-time `content_html`, taken from
+        the pin file rather than re-rendered (rule 2). Under `hugo
+        --minify` the page is minified like the rest of the site, which
+        respells the bytes but changes no element, attribute or word, so
+        `blyg_validate.py` (`carries`) compares markup rather than bytes;
+        the JSON twin stays the byte-exact citation.
+      - a visible frozen-snapshot banner and a link to the `v{n}.json`
+        twin (rule 3, SHOULD). `rel="canonical"` to the live permalink
+        is the site's head's to emit, from `.Params.blyg_canonical`; the
+        validator checks it where present.
       - not publish events: they appear in neither `feed.xml` nor
         `items/index.json`, and add no manifest vocabulary (rule 4).
       *(`tests/pages_e2e.sh` proves the content survives an edit, a kind
@@ -380,17 +386,17 @@ called from the manifest template; `blyg_validate.py` checks the built file.)*
 - [ ] Curated, never complete, opt-in per subscription: every entry is
       one the publisher wrote into the data file; nothing is exported
       from a subscription list.
-- [ ] (SHOULD) `<link rel="blogroll">` on the HTML feed page: that page
-      belongs to the site, so the link is the site's to add (README,
-      "Blogroll").
+- [ ] (SHOULD) `<link rel="blogroll">` on the HTML feed page, emitted by
+      `partials/blyg/head.html` when a blogroll is served.
 - [ ] The blogroll never changes the conformance level (§3).
 
 ## §12 — Resolution (publisher-facing SHOULD)
 
-- [ ] Every page `partials/blyg/pages.html` writes carries `<link
-      rel="blyg">` naming the origin, and the feed's `rel="alternate"`
-      (step 6's autodiscovery). Each `feed.xml` entry's `<link>` is its
-      item's live page, as in §7's example.
+- [ ] The blyg pages render in the site's own `baseof.html`, whose
+      `<link rel="blyg">` (setup step 4) `blyg_validate.py` checks on each
+      item page; `partials/blyg/head.html` adds the feed's
+      `rel="alternate"` (step 6's autodiscovery) there. Each `feed.xml`
+      entry's `<link>` is its item's live page, as in §7's example.
 
 - [ ] The blyg mounts at `/blyg/`, away from the pages people share, so
       every page's `<head>` carries `<link rel="blyg"

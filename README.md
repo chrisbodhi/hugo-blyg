@@ -28,8 +28,10 @@ for the scripts.
 
 ## Setup
 
-Hugo Modules merge an imported module's `layouts/`, `data/`, `static/`,
-`archetypes/`, and `i18n/` into the site's own filesystem automatically.
+Hugo Modules merge an imported module's `content/`, `layouts/`, `data/`,
+`static/`, `archetypes/`, and `i18n/` into the site's own filesystem
+automatically (this module's `content/` holds only the content adapter
+that adds the blyg pages).
 They do **not** merge a module's own `hugo.toml`/`config.toml` — site-wide
 configuration (`[outputFormats]`, `[mediaTypes]`, `[outputs]`, `[params]`)
 has to be declared by whatever site imports this module (verified
@@ -37,7 +39,7 @@ empirically against Hugo 0.151.0). So this module owns all the actual
 document-shaping logic — `layouts/partials/blyg/item.html` builds one item
 document; `layouts/blyg/section.blygmanifest.json` and
 `layouts/blyg/section.blygfeed.xml` build the four surfaces — and the site
-supplies four things.
+supplies five things.
 
 **1. The module.** If the site isn't a Hugo Module yet, `hugo mod init
 <your-site-module-path>` first. Then:
@@ -73,13 +75,13 @@ behavior for its items:
 ```toml
 +++
 title = "blyg"
-outputs = ["blygmanifest", "blygfeed"]
+outputs = ["html", "blygmanifest", "blygfeed"]   # "html": the feed page
 
 [[cascade]]
   [cascade.target]
     kind = "page"
   [cascade.build]
-    render = "never"   # hugo-blyg writes item pages itself
+    render = "never"   # hugo-blyg adds id-based item pages itself
     list = "always"    # but still enumerable via .Pages
 +++
 ```
@@ -91,7 +93,7 @@ have no business running there. The cascade is scoped to `kind = "page"`
 so the section page itself, which is where the surfaces are built, still
 renders. Items' own Hugo pages never render: their URLs would come from
 file names, and an item's permalink comes from its id, so the module
-writes those pages itself (see "HTML pages").
+adds those pages itself (see "HTML pages").
 
 **4. A `<link rel="blyg">`** in every page's `<head>` (§12.1 step 4),
 pointing at the section, so resolving a page never depends on probing
@@ -99,6 +101,17 @@ pointing at the section, so resolving a page never depends on probing
 
 ```gotemplate
 <link rel="blyg" href="{{ "blyg/" | absURL }}">
+```
+
+**5. A `baseof.html` with a `main` block**, which almost every Hugo
+theme already has. The blyg pages are ordinary pages of the site: the
+module's layouts only define `main`, so they render inside the site's
+own head, header, navigation and styles. Two optional touches in its
+`<head>` (see "HTML pages" for what they do):
+
+```gotemplate
+<link rel="canonical" href="{{ .Params.blyg_canonical | default .Permalink }}">
+{{ partial "blyg/head.html" . }}
 ```
 
 **CORS.** Protocol v0.2 §4 (SHOULD): public JSON/XML responses SHOULD
@@ -489,58 +502,77 @@ There's no need to mark a feed as a blyg; a reader resolving its
 With at least one entry, the build publishes `blogroll.opml` and adds
 `"blogroll": "blogroll.opml"` to `blyg.json`. With none, or no file,
 there is neither (§11: a blyg with nothing to show serves no blogroll).
-The feed page (see "HTML pages") carries the `<link rel="blogroll">`
-§11 asks for.
+`partial "blyg/head.html"` puts the `<link rel="blogroll">` §11 asks
+for on the feed page (see "HTML pages").
 
 ## HTML pages
 
-§4 says publishers SHOULD serve human-readable HTML next to the JSON,
-and the module writes it, fanned out from the manifest template like
-`items/{id}.json`, so a site needs no config for it:
+§4 says publishers SHOULD serve human-readable HTML next to the JSON.
+The module adds it as ordinary pages of the site, rendered inside the
+site's own `baseof.html` — so they look like the rest of the site — and
+its layouts supply only the `main` block:
 
-| Path under the origin | Page |
-|---|---|
-| `index.html` | the feed page: the 50 most recently updated live items, newest first |
-| `f/{id}/`, `t/{id}/` | an item's live permalink: a fragment's under `f/`, a thread's under `t/` (§8.4's paths) |
-| `f/{id}/v{n}/`, `t/{id}/v{n}/` | a pinned version (§8.4), only while version *n* is pinned |
+| Path under the origin | Page | Added by |
+|---|---|---|
+| `index.html` | the feed page: the 50 most recently updated live items, newest first | the section's `"html"` output (`layouts/blyg/section.html`) |
+| `f/{id}/`, `t/{id}/` | an item's live permalink: a fragment's under `f/`, a thread's under `t/` (§8.4's paths) | the content adapter (`content/blyg/_content.gotmpl`) |
+| `f/{id}/v{n}/`, `t/{id}/v{n}/` | a pinned version (§8.4), only while version *n* is pinned | the content adapter |
 
-Every page carries `<link rel="blyg">` (§12.1) and the feed's
-`rel="alternate"`. Each `feed.xml` entry's `<link>` is its item's live
-page, and the feed page links the blogroll when one is served.
+The content adapter is a Hugo content adapter the module mounts into the
+site's `content/blyg/`. It adds one page per ledger entry and one per
+pin, built but never listed, so they stay out of `.Pages`, the site's
+own lists and feeds, and every blyg surface (§8.4 rule 4). Each item
+page's `<title>` is the first line of the item's text, since items have
+no title of their own. Each `feed.xml` entry's `<link>` is its item's
+live page.
 
 An item page shows the live content and a version line citing only the
 live version and the pins, like "v6 · pinned: v2, v4": §8.4 forbids any
 page offering or implying access to unpinned history, so there is no
 version list. A withdrawn item's page stays up, says it was withdrawn,
 and still cites its pins. The permalink follows the item's authored
-kind, so an item whose kind changes moves between `f/` and `t/` and
-leaves a redirect at the old address.
+kind, so an item whose kind changes moves between `f/` and `t/`, and the
+old address becomes an alias that redirects to it.
 
 A pinned page is built from the pin file, never re-rendered: its
-content is that version's publish-time `content_html`, verbatim
-(§8.4 rule 2), and it is marked as a frozen snapshot, is
-`rel="canonical"` to the live page, and links its `v{n}.json` twin
-(rule 3). `hugo --minify` doesn't rewrite `resources.FromString` output
-(checked against Hugo 0.151.0), so the bytes survive a minified build.
-This is also where the templates read pins back: a pin the ledger
-records whose `static/blyg/items/{id}/v{n}.json` is missing, or names
-another id or version, fails the build, since a pin MUST return 200
-forever (§8). The module reads pins from the site root's `static/`,
-which is where `blyg_stamp.py pin` writes them by default.
+content is that version's publish-time `content_html` (§8.4 rule 2),
+marked as a frozen snapshot, and it links the live page and its
+`v{n}.json` twin (rule 3). Built with `hugo --minify`, the page is
+minified like every other page on the site, which changes the bytes'
+spelling (quotes, whitespace) but not one element, attribute or word
+of the content; `blyg_validate.py` compares it that way, and the JSON
+twin remains the byte-exact citation. This is also where the templates
+read pins back: a pin the ledger records whose
+`static/blyg/items/{id}/v{n}.json` is missing, or names another id or
+version, fails the build, since a pin MUST return 200 forever (§8). The
+module reads pins from the site root's `static/`, which is where
+`blyg_stamp.py pin` writes them by default.
 
-Pages are presentation, so every part can be overridden from the site's
-own `layouts/partials/blyg/html/`: `page.html` is the document around
-the content (head, styles, chrome), `main.html` is the content of each
-page, and `redirect.html` is the moved-permalink stub. Keep what §8.4
-requires of a pinned page when overriding `main.html`: the pin's
-`content_html` untouched, the frozen marking, and the link to its
-JSON twin. `blyg_validate.py` checks the first and last.
+**The `<head>`** is the site's. Two things there are worth adding (setup
+step 5):
 
-To turn the pages off, set `pages = false` under `[params.blyg]`. Only
-do that on a site that has never served them with a pin: a pinned
-page, once served, MUST keep returning 200 (§8.4 rule 1). The module
-owns `/blyg/index.html`, so don't add `"html"` to the section's
-`outputs` as well.
+- `partial "blyg/head.html"` emits nothing on the site's other pages.
+  On blyg pages it adds the feed's `rel="alternate"` (RSS
+  autodiscovery, §12 step 6) and the item's or pin's JSON twin, plus, on
+  the feed page, `<link rel="blogroll">` (§11) when a blogroll is served.
+- A pinned page SHOULD be `rel="canonical"` to the live page (§8.4
+  rule 3). It carries that URL as `.Params.blyg_canonical`, so a head
+  that emits a canonical link should prefer it, as in step 5.
+  `blyg_validate.py` checks a canonical link wherever there is one, and
+  doesn't require one.
+
+**Styling** is the site's too. The content (`partials/blyg/html/main.html`)
+comes unstyled, with classes to hook: `blyg-feed`, `blyg-item`,
+`blyg-meta`, `blyg-frozen` (the pinned-snapshot banner), and the wire
+tokens `blyg-transclusion` and `blyg-tk-gen`. Override `main.html` in the
+site's own `layouts/partials/blyg/html/` to change what the pages say.
+Keep what §8.4 requires of a pinned page: the pin's `content_html`
+untouched, the frozen marking, and the link to its JSON twin.
+
+To turn the item pages off, set `pages = false` under `[params.blyg]`
+(and drop `"html"` from the section's `outputs` if the feed page should
+go too). Only do that on a site that has never served them with a pin:
+a pinned page, once served, MUST keep returning 200 (§8.4 rule 1).
 
 ## Generation provenance
 

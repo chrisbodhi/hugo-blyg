@@ -8,8 +8,8 @@
   plus each items/{id}.json are fanned out via resources.FromString,
   which only actually publishes once its result is accessed -- hence the
   `$_ := $r.RelPermalink` discards below. The optional blogroll.opml
-  (§11) is fanned out the same way, by partials/blyg/blogroll.html, and
-  so are the HTML pages, by partials/blyg/pages.html.
+  (§11) is fanned out the same way, by partials/blyg/blogroll.html. (The
+  HTML pages are real pages, added by content/blyg/_content.gotmpl.)
 */ -}}
 {{- $base := site.BaseURL -}}
 {{- $ledger := site.Data.blyg.ledger -}}
@@ -33,7 +33,6 @@
 {{- end -}}
 
 {{- $indexEntries := slice -}}
-{{- $pageItems := slice -}}
 {{- $updated := "" -}}
 {{- $built := slice -}}
 
@@ -49,8 +48,9 @@
       {{- $doc := partial "blyg/item.html" (dict "page" $page "ledger" $entry "base" $base) -}}
       {{- $r := resources.FromString (printf "blyg/items/%s.json" $id) ($doc | jsonify) -}}
       {{- $_ := $r.RelPermalink -}}
-      {{- $pins := partial "blyg/pins.html" (dict "id" $id "ledger" $entry) -}}
-      {{- $pageItems = $pageItems | append (dict "id" $id "entry" $entry "doc" $doc "pins" $pins) -}}
+      {{- /* Reads every recorded pin back, failing the build on one whose
+             file is missing or wrong (§8) -- with or without pages. */ -}}
+      {{- $_ := partial "blyg/pins.html" (dict "id" $id "ledger" $entry) -}}
       {{- $indexEntries = $indexEntries | append (dict
           "id" $id
           "kind" $doc.kind
@@ -103,9 +103,7 @@
   {{- $manifest = merge $manifest (dict "author" (dict "name" .)) -}}
 {{- end -}}
 {{- /* §6.1/§11: the key is present only while a non-empty blogroll is served. */ -}}
-{{- $blogroll := partial "blyg/blogroll.html" . -}}
-{{- with $blogroll -}}
+{{- with partial "blyg/blogroll.html" . -}}
   {{- $manifest = merge $manifest (dict "blogroll" .) -}}
 {{- end -}}
-{{- $_ := partial "blyg/pages.html" (dict "items" $pageItems "base" $base "blogroll" $blogroll) -}}
 {{ $manifest | jsonify }}

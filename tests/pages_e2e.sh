@@ -29,17 +29,20 @@ build() {
   hugo --minify --quiet
   python3 "$repo/scripts/blyg_validate.py" >/dev/null
 }
-frozen() {  # the pinned page's content, which must be exactly the pin's content_html
-  python3 - "$pinned" "static/blyg/items/$id/v1.json" <<'PY'
-import json, re, sys
-page = open(sys.argv[1], encoding="utf-8").read()
-pin = json.load(open(sys.argv[2], encoding="utf-8"))["content_html"]
-m = re.search(r'<article class="blyg-item">(.*)</article>', page, re.S)
-sys.exit(0 if m and m.group(1) == pin else 1)
+frozen() {  # the pinned page still carries exactly the pin's content_html
+  # (as markup: the page is minified with the rest of the site, the JSON
+  # twin is the byte-exact citation -- see blyg_validate.carries)
+  python3 - "$repo/scripts" "$pinned" "static/blyg/items/$id/v1.json" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import blyg_validate
+page = open(sys.argv[2], encoding="utf-8").read()
+pin = json.load(open(sys.argv[3], encoding="utf-8"))["content_html"]
+sys.exit(0 if blyg_validate.carries(page, pin) else 1)
 PY
 }
 versions() {  # the version line of a live page, tags stripped
-  grep -o '<p class="blyg-meta">v[^<]*\(<a [^>]*>[^<]*</a>\)*' "$1" | sed 's/<[^>]*>//g'
+  grep -o '<p class="\?blyg-meta"\?>v[^<]*\(<a [^>]*>[^<]*</a>\)*' "$1" | sed 's/<[^>]*>//g'
 }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -57,7 +60,7 @@ frozen || fail "an edit changed the pinned page (§8.4 rule 2)"
 [ "$(versions public/blyg/f/$id/index.html)" = "v2 · pinned: v1" ] \
   || fail "live page doesn't show v2 and cite only the pin"
 [ ! -e "public/blyg/f/$id/v2" ] || fail "an unpinned version got a page (§8.4 rule 1)"
-echo "ok: an edit leaves the pinned content byte-identical"
+echo "ok: an edit leaves the pinned content unchanged"
 
 # 2. Kind change: the live page moves to t/, f/ redirects, the pin stays put.
 sed -i.bak 's/^blyg_kind = "fragment"$/blyg_kind = "thread"/' "$md" && rm "$md.bak"
@@ -68,7 +71,7 @@ frozen || fail "a kind change changed the pinned page"
   || fail "live page didn't move to t/"
 grep -q "url=https://example.org/blyg/t/$id/" "public/blyg/f/$id/index.html" \
   || fail "the old f/ permalink doesn't redirect to t/"
-grep -q "rel=\"canonical\" href=\"https://example.org/blyg/t/$id/\"" "$pinned" \
+grep -q "rel=\"\\?canonical\"\\? href=\"\\?https://example.org/blyg/t/$id/" "$pinned" \
   || fail "the pinned page isn't canonical to the moved live page"
 echo "ok: a kind change moves the live page and leaves a redirect"
 

@@ -369,8 +369,20 @@ class PageTests(SurfaceTests):
     def test_pinned_page_must_be_verbatim(self):
         self.pin_v1()
         self.pages[f"t/{ID}/v1/index.html"] = page(
-            self.LIVE, "<p>Body. </p>", [f"{ORIGIN}items/{ID}/v1.json"])
+            self.LIVE, "<p>Body!</p>", [f"{ORIGIN}items/{ID}/v1.json"])
         self.assertTrue(any("verbatim" in p for p in self.problems()))
+
+    def test_a_minified_pinned_page_still_carries_the_pin(self):
+        self.pin_v1()
+        self.pages[f"t/{ID}/v1/index.html"] = (
+            f"<html><head><link rel=canonical href={self.LIVE}><link rel=blyg href={ORIGIN}>"
+            f"</head><body><p>Body.\n</p><a href={ORIGIN}items/{ID}/v1.json>x</a></body></html>")
+        self.assertEqual(self.problems(), [])
+
+    def test_a_missing_canonical_is_the_sites_call(self):
+        self.pages[f"t/{ID}/index.html"] = (
+            f'<link rel="blyg" href="{ORIGIN}"><p>Body.</p>')
+        self.assertEqual(self.problems(), [])
 
     def test_pinned_page_is_canonical_to_the_live_page(self):
         self.pin_v1()

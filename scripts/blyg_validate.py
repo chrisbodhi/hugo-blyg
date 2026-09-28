@@ -555,6 +555,55 @@ class _PageCollector(html.parser.HTMLParser):
             self.refresh = (a.get("content") or "").partition("url=")[2] or None
 
 
+VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+             "meta", "source", "track", "wbr"}
+
+
+class _Markup(html.parser.HTMLParser):
+    """HTML as a list of tokens that an HTML minifier doesn't change:
+    tags with their (sorted) attributes, and text with whitespace runs
+    collapsed. Quoting, entity spelling, attribute order, self-closing
+    slashes and inter-tag whitespace all drop out."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tokens: list[tuple] = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tokens.append(("<", tag, tuple(sorted((k, v or "") for k, v in attrs))))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag not in VOID_TAGS:
+            self.tokens.append(("</", tag))
+
+    def handle_data(self, data):
+        text = " ".join(data.split())
+        if text:
+            self.tokens.append(("text", text))
+
+
+def markup(fragment: str) -> list[tuple]:
+    parser = _Markup()
+    parser.feed(fragment)
+    parser.close()
+    return parser.tokens
+
+
+def carries(page_html: str, content_html: str) -> bool:
+    """Whether a page carries `content_html` as-is: the same markup, in one
+    unbroken run. Not a byte comparison: a site that builds with
+    `hugo --minify` minifies these pages like its others -- quoting,
+    whitespace -- which changes bytes but not one element, attribute or
+    word of the content. (The byte-exact citation is the JSON twin.)"""
+    want, have = markup(content_html), markup(page_html)
+    if not want:
+        return True
+    return any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
+
+
 def _page(path: Path) -> tuple[str, _PageCollector]:
     text = path.read_text(encoding="utf-8")
     collector = _PageCollector()
@@ -581,14 +630,19 @@ def check_pages(public_blyg: Path, ledger: dict, docs: dict, origin: str,
                 problems: Problems) -> None:
     """§8.4 and §4's human-readable HTML, when the build wrote it: every
     item has its live permalink page; a pinned page exists exactly for
-    each pin (404 otherwise), carrying the pin's content_html verbatim,
-    marked with rel="canonical" to the live page and linking its JSON
-    twin; and no page anywhere links a version the origin doesn't
-    promise forever -- the live one and pins (§8.4)."""
+    each pin (404 otherwise), carrying the pin's content_html unaltered
+    and linking its JSON twin; and no page anywhere links a version the
+    origin doesn't promise forever -- the live one and pins (§8.4).
+
+    The pages render inside the site's own baseof.html, so rel="canonical"
+    is the site's head's to emit: it's checked where present (a wrong one
+    is worse than none), but a missing one isn't a problem."""
     if not pages_built(public_blyg):
         return
     if not (public_blyg / "index.html").is_file():
-        problems.add("index.html", "item pages are built, but the feed page isn't")
+        problems.add("index.html", "item pages are built, but the feed page isn't -- "
+                                   "add \"html\" to the section's outputs in "
+                                   "content/blyg/_index.md")
     pinned = {(i, c["version"]) for i, e in ledger.items()
               for c in e["changelog"] if c.get("pinned")}
     pages: list[Path] = [public_blyg / "index.html"]
@@ -601,12 +655,12 @@ def check_pages(public_blyg: Path, ledger: dict, docs: dict, origin: str,
             problems.add(where, f"missing -- {blyg_id}'s live page")
             continue
         text, page = _page(path)
-        if page.rels.get("canonical") != [live]:
+        if page.rels.get("canonical", [live]) != [live]:
             problems.add(where, f"rel=canonical is {page.rels.get('canonical')}, not {live}")
         if page.rels.get("blyg") != [origin]:
             problems.add(where, f"<link rel=\"blyg\"> MUST name the origin {origin} (§12.1)")
         doc = docs.get(blyg_id) or {}
-        if doc.get("kind") not in (None, "withdrawn") and doc.get("content_html", "") not in text:
+        if doc.get("kind") not in (None, "withdrawn") and not carries(text, doc.get("content_html", "")):
             problems.add(where, "doesn't carry the item's live content_html")
 
         for n in sorted(v for i, v in pinned if i == blyg_id):
@@ -621,10 +675,10 @@ def check_pages(public_blyg: Path, ledger: dict, docs: dict, origin: str,
                                  f"MUST return 200 forever once served (§8.4 rule 1)")
                 continue
             ptext, ppage = _page(public_blyg / pw)
-            if pin.get("content_html", "") not in ptext:
+            if not carries(ptext, pin.get("content_html", "")):
                 problems.add(pw, "MUST carry the pinned version's publish-time content_html "
                                  "verbatim (§8.4 rule 2)")
-            if ppage.rels.get("canonical") != [live]:
+            if ppage.rels.get("canonical", [live]) != [live]:
                 problems.add(pw, f"rel=canonical SHOULD point at the live page {live} (§8.4 rule 3)")
             if f"{origin}items/{blyg_id}/v{n}.json" not in ppage.hrefs:
                 problems.add(pw, f"SHOULD link its v{n}.json twin (§8.4 rule 3)")

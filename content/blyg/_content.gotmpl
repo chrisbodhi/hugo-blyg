@@ -1,0 +1,63 @@
+{{- /*
+  A Hugo content adapter, mounted into the consuming site's content/blyg/
+  by this module, that adds the human-readable pages §4 says a publisher
+  SHOULD serve (§8.4 for the pinned ones):
+
+    blyg/{f|t}/{id}/        each item's live permalink
+    blyg/{f|t}/{id}/v{n}/   each pinned version, and no other
+
+  They're real pages, so they render inside the site's own baseof.html:
+  the module's layouts/blyg/page.html only defines "main". Everything
+  here comes from the ledger, since an adapter runs before other pages
+  exist; the layout finds the item's page and builds its document at
+  render time. Nothing is added when [params.blyg] pages = false.
+
+  The item's own Markdown page still never renders (the section's
+  cascade): its URL would come from the file name, and a permalink here
+  comes from the id. These pages set their own build options over that
+  cascade -- rendered, but never listed, so they stay out of .Pages, the
+  site's own lists and feeds, and every blyg surface (§8.4 rule 4).
+
+  The permalink follows the ledger's authored kind (which withdrawal
+  keeps), so a kind change moves it between f/ and t/; the old address
+  becomes an alias, which Hugo serves as a redirect. A pinned page lives
+  under the kind that version had.
+*/ -}}
+{{- if partial "blyg/pages-enabled.html" . -}}
+{{- range $id, $entry := site.Data.blyg.ledger -}}
+  {{- $live := partial "blyg/permalink.html" (dict "id" $id "kind" $entry.kind "base" site.BaseURL) -}}
+  {{- $dir := cond (eq $entry.kind "fragment") "f" "t" -}}
+  {{- $title := partial "blyg/title.html" $entry -}}
+  {{- $last := index $entry.changelog (sub (len $entry.changelog) 1) -}}
+
+  {{- $aliases := slice -}}
+  {{- range $entry.changelog -}}
+    {{- if and (in (slice "fragment" "thread") .kind) (ne .kind $entry.kind) -}}
+      {{- $old := printf "/blyg/%s/%s/" (cond (eq .kind "fragment") "f" "t") $id -}}
+      {{- if not (in $aliases $old) -}}{{- $aliases = $aliases | append $old -}}{{- end -}}
+    {{- end -}}
+  {{- end -}}
+
+  {{- $.AddPage (dict
+      "path" (printf "%s/%s" $dir $id)
+      "kind" "page"
+      "title" $title
+      "params" (dict "blyg_page" "item" "blyg_id" $id)
+      "aliases" $aliases
+      "dates" (dict "date" (time.AsTime $entry.created) "lastmod" (time.AsTime $last.at))
+      "build" (dict "render" "always" "list" "never")
+  ) -}}
+
+  {{- range partial "blyg/pins.html" (dict "id" $id "ledger" $entry) -}}
+    {{- $.AddPage (dict
+        "path" (printf "%s/%s/v%d" (cond (eq .kind "fragment") "f" "t") $id (int .version))
+        "kind" "page"
+        "title" (printf "%s (v%d, pinned)" $title (int .version))
+        "params" (dict "blyg_page" "pin" "blyg_id" $id "blyg_version" (int .version)
+                       "blyg_canonical" $live)
+        "dates" (dict "date" (time.AsTime .at))
+        "build" (dict "render" "always" "list" "never")
+    ) -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
