@@ -549,7 +549,8 @@ followed by a metadata block:
 - **Created**, and, once there's a v2, **Most recent** with its version;
 - **Permalink**.
 
-On the feed page a fragment shows in full. A thread is cut short to a
+On the feed page an `<hr>` separates each item from the next, and a
+fragment shows in full. A thread is cut short to a
 card: an italic *thread* label, then its own text as plain text up to its
 first transclusion (the quote is someone else's words, and flattened
 into an excerpt it would read as the thread's), capped at 300
@@ -627,6 +628,8 @@ pages as well:
 
 Each item also uses `header` (a pinned page's banner) and `footer` (its
 metadata block), and each `time` element carries its ISO 8601 timestamp.
+On the feed page an `<hr>` sits between items, so they read apart
+without a stylesheet; `.blyg > hr { display: none }` hides it.
 `.stub-cite`, the reference client's "In response to" line, will sit
 above an item's `div.item-content` once protocol 0.3's stubs are built.
 
@@ -636,7 +639,7 @@ replace one without taking over the rest:
 
 | Partial | Renders |
 |---|---|
-| `view/feed.html` | the feed page: its heading, the entries, the stepper |
+| `view/feed.html` | the feed page: its heading, the entries with an `<hr>` between them, the stepper |
 | `view/entry.html` | one item on the feed page: a fragment, or a thread's card |
 | `view/excerpt.html` | a thread card's text (returns plain text) |
 | `view/item.html` | an item's live page, or its withdrawal endcap |

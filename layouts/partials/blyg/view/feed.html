@@ -4,14 +4,21 @@
   entry.html each, then the version stepper for the entries it can step
   (a thread's card shows no body to swap).
 
+  An <hr> separates one entry from the next, so they don't run together
+  on a page without a stylesheet; a theme that separates items its own
+  way hides it with `.blyg > hr { display: none }`.
+
     {{ partial "blyg/view/feed.html" (dict "title" .Title "items" $models) }}
 */ -}}
 <div class="blyg">
 <header>
 <h1>{{ .title }}</h1>
 </header>
-{{- range .items }}
-{{- partial "blyg/view/entry.html" . }}
+{{- range $i, $m := .items }}
+{{- if $i }}
+<hr>
+{{- end }}
+{{- partial "blyg/view/entry.html" $m }}
 {{- else }}
 <p class="withdrawn">Nothing published yet.</p>
 {{- end }}
