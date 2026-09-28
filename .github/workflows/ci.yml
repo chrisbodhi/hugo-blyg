@@ -52,6 +52,25 @@ jobs:
       - name: Pinned pages stay frozen
         run: ../tests/pages_e2e.sh
 
+      # The HTML pages are presentation: blyg.json, items/*.json, the pins
+      # and feed.xml (apart from each entry's <link>) must come out
+      # byte-identical with [params.blyg] pages on and off.
+      - name: Pages change no protocol surface
+        run: ../tests/surfaces_e2e.sh
+
+      # The version stepper in headless Chromium: it steps an item through
+      # its pins in place, fetching nothing else (§8.4), and with
+      # JavaScript off every pin is still a plain link.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Playwright
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pw" --no-save --no-package-lock playwright@1.56.1
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Version stepper works, and isn't needed
+        run: NODE_PATH="$RUNNER_TEMP/pw/node_modules" ../tests/stepper_e2e.sh
+
       # And the build gate itself. A blyg-gen parameter isn't part of
       # content_md, so the hash can't see it; the build still refuses to
       # ship provenance the ledger never recorded (§5.7).
