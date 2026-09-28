@@ -94,6 +94,7 @@ class SurfaceTests(unittest.TestCase):
                             "changelog": [{"version": 1, "at": "2026-01-01T00:00:00Z",
                                            "note": None, "kind": "thread"}]}}
         self.feed_items = None
+        self.manifest_extra = {}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -103,7 +104,8 @@ class SurfaceTests(unittest.TestCase):
         updated = max(d["updated"] for d in self.docs.values())
         (self.blyg / "blyg.json").write_text(json.dumps({
             "blyg": "0.2", "level": 1, "generator": "t", "site": ORIGIN, "title": "t",
-            "feed": "feed.xml", "items": "items/index.json", "updated": updated}), encoding="utf-8")
+            "feed": "feed.xml", "items": "items/index.json", "updated": updated,
+            **self.manifest_extra}), encoding="utf-8")
         rows = sorted(({k: d[k] for k in ("id", "kind", "created", "updated", "version")}
                        for d in self.docs.values()), key=lambda r: r["updated"], reverse=True)
         (self.blyg / "items" / "index.json").write_text(
@@ -196,6 +198,45 @@ class SurfaceTests(unittest.TestCase):
         self.ledger[ID]["changelog"][0]["pinned"] = True
         self.docs[ID]["changelog"][0]["pinned"] = True
         self.assertTrue(any("pin" in p for p in self.problems()))
+
+    def blogroll(self, *outlines, key="blogroll.opml"):
+        self.manifest_extra = {"blogroll": key}
+        (self.blyg / "blogroll.opml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?><opml version="2.0">'
+            f'<head><title>t</title></head><body>{"".join(outlines)}</body></opml>',
+            encoding="utf-8")
+
+    OUTLINE = ('<outline type="rss" text="A" title="A" xmlUrl="https://a.example/feed.xml" '
+               'htmlUrl="https://a.example/"/>')
+
+    def test_blogroll_passes(self):
+        self.blogroll(self.OUTLINE)
+        self.assertEqual(self.problems(), [])
+
+    def test_blogroll_key_without_the_file_fails(self):
+        self.manifest_extra = {"blogroll": "blogroll.opml"}
+        self.assertTrue(any("isn't served" in p for p in self.problems()))
+
+    def test_blogroll_file_without_the_key_fails(self):
+        self.blogroll(self.OUTLINE)
+        self.manifest_extra = {}
+        self.assertTrue(any("no blogroll key" in p for p in self.problems()))
+
+    def test_blogroll_filename_is_fixed(self):
+        self.blogroll(self.OUTLINE, key="roll.opml")
+        self.assertTrue(any("protocol-fixed" in p for p in self.problems()))
+
+    def test_empty_blogroll_fails(self):
+        self.blogroll()
+        self.assertTrue(any("nothing to show" in p for p in self.problems()))
+
+    def test_blogroll_extension_attribute_fails(self):
+        self.blogroll(self.OUTLINE.replace("/>", ' blygOrigin="https://a.example/"/>'))
+        self.assertTrue(any("outside OPML 2.0" in p for p in self.problems()))
+
+    def test_blogroll_relative_url_fails(self):
+        self.blogroll(self.OUTLINE.replace('"https://a.example/feed.xml"', '"/feed.xml"'))
+        self.assertTrue(any("xmlUrl" in p for p in self.problems()))
 
 
 FRAG = "5cx94j6wbmzrdnnjxvs9j1nkba"

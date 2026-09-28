@@ -43,6 +43,11 @@ URL_ATTRS = {"href", "src", "poster", "cite", "action", "formaction", "data",
 EMBED_TAGS = {"img", "source", "video", "audio", "track", "embed", "object", "input"}
 CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)([^'\")]*)\1\s*\)")
 SAFE_SCHEMES = ("http:", "https:", "mailto:", "tel:", "data:")
+# Every <outline> attribute OPML 2.0 defines (common, subscription-list,
+# and link/include types); anything else would be an extension (§11).
+OPML_OUTLINE_ATTRS = {"text", "type", "isComment", "isBreakpoint", "created",
+                      "category", "description", "htmlUrl", "language", "title",
+                      "version", "xmlUrl", "url"}
 
 
 class Problems(list):
@@ -145,11 +150,56 @@ def check_manifest(public_blyg: Path, problems: Problems) -> dict | None:
         problems.add("blyg.json", "site must be the origin base URL, ending in /")
     if not is_iso_z(manifest.get("updated")):
         problems.add("blyg.json", f"updated {manifest.get('updated')!r} is not ISO 8601 UTC")
-    if "blogroll" in manifest and not (public_blyg / "blogroll.opml").is_file():
-        problems.add("blyg.json", "blogroll key present but blogroll.opml isn't served (§6.1)")
     if "author" in manifest and not isinstance(manifest["author"], dict):
         problems.add("blyg.json", "author must be an object")
     return manifest
+
+
+def check_blogroll(public_blyg: Path, manifest: dict, problems: Problems) -> None:
+    """§11: blogroll.opml is standard OPML 2.0 with no extensions, one
+    `type="rss"` outline per shown subscription, and exists exactly when
+    the manifest's `blogroll` key names it -- a blyg with nothing to show
+    serves no file and omits the key (§6.1)."""
+    where = "blogroll.opml"
+    path = public_blyg / where
+    key = manifest.get("blogroll")
+    if key is None:
+        if path.is_file():
+            problems.add(where, "served, but blyg.json has no blogroll key (§6.1) -- "
+                                "a leftover from an earlier build? (hugo --cleanDestinationDir)")
+        return
+    if key != where:
+        problems.add("blyg.json", f"blogroll is {key!r}; the filename is protocol-fixed "
+                                  f"as {where!r} (§11)")
+    if not path.is_file():
+        problems.add("blyg.json", f"blogroll key present but {where} isn't served (§6.1)")
+        return
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        problems.add(where, f"unparseable: {exc}")
+        return
+    if root.tag != "opml" or root.get("version") != "2.0":
+        problems.add(where, "not an OPML 2.0 document (§11)")
+    if root.find("head") is None or root.find("body") is None:
+        problems.add(where, "OPML needs <head> and <body>")
+        return
+    outlines = list(root.find("body").iter("outline"))
+    if not outlines:
+        problems.add(where, "no entries -- a blyg with nothing to show serves no "
+                            "blogroll.opml and omits the manifest key (§11)")
+    for n, o in enumerate(outlines, start=1):
+        w = f"{where} outline {n}"
+        extra = sorted(set(o.attrib) - OPML_OUTLINE_ATTRS)
+        if extra:
+            problems.add(w, f"carries {extra}, outside OPML 2.0 -- the blogroll has "
+                            f"no blyg-specific attributes (§11)")
+        if o.get("type") != "rss" or not o.get("text"):
+            problems.add(w, 'every entry is type="rss" with a text display title (§11)')
+        for attr in ("xmlUrl", "htmlUrl"):
+            parts = urlsplit(o.get(attr) or "")
+            if parts.scheme not in ("http", "https") or not parts.netloc:
+                problems.add(w, f"{attr} {o.get(attr)!r} isn't an absolute http(s) URL (§11)")
 
 
 def check_item(blyg_id: str, entry: dict, origin: str, public_blyg: Path,
@@ -490,6 +540,7 @@ def validate(public_dir: Path, ledger_path: Path) -> Problems:
     if manifest is None:
         return problems
     origin = manifest.get("site", "")
+    check_blogroll(public_blyg, manifest, problems)
 
     docs = {}
     for blyg_id, entry in sorted(ledger.items()):

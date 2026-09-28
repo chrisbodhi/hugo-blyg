@@ -3,7 +3,8 @@
 A Hugo Module that builds the static publish-side surfaces of the
 [Blygger protocol](https://github.com/blygger/blygger-spec) v0.2, Level 1
 — `blyg.json` (manifest), `feed.xml`, `items/index.json` (archive index),
-and `items/{id}.json` (canonical item documents) — from a section of
+`items/{id}.json` (canonical item documents), and, optionally,
+`blogroll.opml` (§11) — from a section of
 ordinary Hugo Markdown content plus a small JSON ledger.
 
 It comes in three parts:
@@ -448,11 +449,44 @@ item (indented to the item's content). One that Markdown would read as
 part of an indented code block or a raw-HTML block fails the build
 rather than bake somewhere unexpected; fence it instead.
 
+## Blogroll
+
+The blogroll (§11) is optional, and a publishing act: it lists the
+feeds the site chooses to show, never everything it reads. Write them
+into `data/blyg/blogroll.json` (or `.toml`/`.yaml`):
+
+```json
+{
+  "title": "Someone's blogroll",
+  "feeds": [
+    { "text": "Interconnected",
+      "xmlUrl": "https://interconnected.org/home/feed",
+      "htmlUrl": "https://interconnected.org/home/" }
+  ]
+}
+```
+
+`title` is optional (it defaults to "*site title* blogroll"). Each entry
+needs exactly `text` (the display title), `xmlUrl` (the feed), and
+`htmlUrl` (the blyg's origin, or the site of a plain feed), with both
+URLs absolute. Any other key fails the build: the file is plain OPML 2.0
+with no extensions, so there is nowhere for it to go, and a misspelled
+`xmlurl` would otherwise drop a required attribute without a word.
+There's no need to mark a feed as a blyg; a reader resolving its
+`xmlUrl` finds the feed's `<blyg:manifest>` itself.
+
+With at least one entry, the build publishes `blogroll.opml` and adds
+`"blogroll": "blogroll.opml"` to `blyg.json`. With none, or no file,
+there is neither (§11: a blyg with nothing to show serves no blogroll).
+§11 also asks for `<link rel="blogroll" href="…/blyg/blogroll.opml">`
+on the site's HTML feed page, if it has one; that page is the site's
+own, so the link is too.
+
 ## Not yet built
 
 Not built: pinned per-version JSON files served from
 `static/blyg/items/{id}/v{n}.json` (`scripts/blyg_stamp.py pin <id>`
-writes them; the templates don't read them back), the optional blogroll (§11), generation provenance (§5.7, only
+writes them; the templates don't read them back), generation provenance (§5.7, only
 needed once a version involves generation), and any live HTML permalink
 page for an item (§8.4).
 

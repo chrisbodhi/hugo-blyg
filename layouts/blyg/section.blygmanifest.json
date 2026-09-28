@@ -7,7 +7,8 @@
   .blygmanifest, baseName "blyg", in config.toml), and items/index.json
   plus each items/{id}.json are fanned out via resources.FromString,
   which only actually publishes once its result is accessed -- hence the
-  `$_ := $r.RelPermalink` discards below.
+  `$_ := $r.RelPermalink` discards below. The optional blogroll.opml
+  (§11) is fanned out the same way, by partials/blyg/blogroll.html.
 */ -}}
 {{- $base := site.BaseURL -}}
 {{- $ledger := site.Data.blyg.ledger -}}
@@ -90,4 +91,8 @@
   "items" "items/index.json"
   "updated" $updated
 -}}
+{{- /* §6.1/§11: the key is present only while a non-empty blogroll is served. */ -}}
+{{- with partial "blyg/blogroll.html" . -}}
+  {{- $manifest = merge $manifest (dict "blogroll" .) -}}
+{{- end -}}
 {{ $manifest | jsonify }}

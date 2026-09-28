@@ -30,9 +30,10 @@ Scope: this module publishes at Level 1 only, as a single-author,
 non-multiplayer origin. Every item authors its `kind` via
 `blyg_kind` in front matter (`"fragment"` or `"thread"`; defaults to
 `"thread"`), and threads resolve `![[id]]` directives against the
-site's own fragments at publish time (§10). The blogroll (§11) and
-generation provenance (§5.7) are not exercised yet, so their rules are
-listed for completeness but not all are load-bearing today.
+site's own fragments at publish time (§10). A site that writes
+`data/blyg/blogroll.json` serves a blogroll (§11). Generation provenance
+(§5.7) is not exercised yet, so its rules are listed for completeness
+but not load-bearing today.
 
 ## §4 — The publication surface
 
@@ -128,7 +129,7 @@ listed for completeness but not all are load-bearing today.
 
 - [ ] `blyg.json` carries `"blyg": "0.2"`, `level`, `generator`, `site`,
       `title`, `feed`, `items`, `updated`; `blogroll` key present only
-      when a non-empty blogroll is served (not the case here).
+      when a non-empty blogroll is served (§11 below).
       `level` comes from `[params.blyg].level` in `config.toml`
       (defaults to `1`); the build refuses any value other than `1`. L2's
       constructs (stub metadata, nesting, `forked_from`, webmention)
@@ -300,6 +301,33 @@ no-cascade rule against real builds in CI.)*
       ledger's stored snapshot.
 - [ ] No auto-pin: `transclusions[].version` may name a version with no
       fetchable per-version file.
+
+## §11 — The blogroll (`blogroll.opml`, OPTIONAL)
+
+*(Built from `data/blyg/blogroll.json` by `layouts/partials/blyg/blogroll.html`,
+called from the manifest template; `blyg_validate.py` checks the built file.)*
+
+- [ ] Standard OPML 2.0 with no extensions, at the protocol-fixed
+      origin-relative `blogroll.opml`. The build refuses any data key
+      besides `text`/`xmlUrl`/`htmlUrl`; the validator refuses any outline
+      attribute OPML 2.0 doesn't define.
+- [ ] One `<outline type="rss">` per entry: `xmlUrl` the feed, `htmlUrl`
+      the origin (or a legacy feed's page), `text`/`title` the display
+      title. Both URLs must be absolute http(s): the file is read from
+      other origins.
+- [ ] No blyg-specific attributes: `<blyg:manifest>` in the listed feed
+      is the upgrade path (§7, §12 step 3).
+- [ ] The manifest's `blogroll` key is present exactly when a non-empty
+      blogroll is served; nothing to show means no file (404) and no key.
+      The validator checks both directions, so a stale `blogroll.opml`
+      left in `public/` by an earlier build is caught too.
+- [ ] Curated, never complete, opt-in per subscription: every entry is
+      one the publisher wrote into the data file; nothing is exported
+      from a subscription list.
+- [ ] (SHOULD) `<link rel="blogroll">` on the HTML feed page: that page
+      belongs to the site, so the link is the site's to add (README,
+      "Blogroll").
+- [ ] The blogroll never changes the conformance level (§3).
 
 ## §12 — Resolution (publisher-facing SHOULD)
 

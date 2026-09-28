@@ -1,0 +1,93 @@
+{{- /*
+  Builds blogroll.opml (§11) from the site's data/blyg/blogroll.json (or
+  .toml/.yaml -- anything Hugo reads as site.Data.blyg.blogroll), and
+  returns the manifest's `blogroll` value: "blogroll.opml" when one was
+  published, "" when there's nothing to show. The caller does:
+
+    {{ $blogroll := partial "blyg/blogroll.html" . }}
+
+  The data file:
+
+    {
+      "title": "Someone's blogroll",            (optional)
+      "feeds": [
+        { "text": "Interconnected",
+          "xmlUrl": "https://interconnected.org/home/feed",
+          "htmlUrl": "https://interconnected.org/home/" }
+      ]
+    }
+
+  Every entry is one the publisher wrote down on purpose, which is
+  §11's opt-in-per-subscription: there is no subscription list here to
+  export from, only this curated one. No file, or no feeds, publishes
+  nothing and omits the manifest key -- a blyg with nothing to show
+  serves no blogroll.opml (§11). Any key besides text/xmlUrl/htmlUrl
+  fails the build rather than vanishing: the OPML is standard OPML 2.0
+  with no extensions (§11), so there is nowhere else for it to go, and
+  a misspelled `xmlurl` would otherwise drop a required attribute
+  silently.
+
+  Published with resources.FromString, like items/{id}.json, so the site
+  needs no extra output format; the manifest template, whose output
+  format is isPlainText (text/template, no autoescaping), is the caller,
+  so every value goes through transform.XMLEscape by hand. That escapes
+  both quote characters too, so it's safe inside attribute values.
+*/ -}}
+{{- $data := dict -}}
+{{- with site.Data.blyg -}}{{- with .blogroll -}}{{- $data = . -}}{{- end -}}{{- end -}}
+{{- range $k, $_ := $data -}}
+  {{- if not (in (slice "title" "feeds") $k) -}}
+    {{- errorf "blyg: data/blyg/blogroll has unknown key %q -- only \"title\" and \"feeds\"" $k -}}
+  {{- end -}}
+{{- end -}}
+{{- $feeds := $data.feeds | default slice -}}
+{{- $title := $data.title | default (printf "%s blogroll" site.Title) -}}
+
+{{- $published := "" -}}
+{{- if $feeds -}}
+  {{- $outlines := slice -}}
+  {{- $seen := slice -}}
+  {{- range $i, $f := $feeds -}}
+    {{- $where := printf "data/blyg/blogroll feeds[%d]" $i -}}
+    {{- range $k, $_ := $f -}}
+      {{- if not (in (slice "text" "xmlUrl" "htmlUrl") $k) -}}
+        {{- errorf "blyg: %s has key %q -- an entry is exactly text, xmlUrl and htmlUrl: the blogroll is plain OPML 2.0, with no blyg-specific attributes (§11)" $where $k -}}
+      {{- end -}}
+    {{- end -}}
+    {{- range slice "text" "xmlUrl" "htmlUrl" -}}
+      {{- if not (index $f .) -}}
+        {{- errorf "blyg: %s has no %q -- every blogroll entry needs text (its display title), xmlUrl (the feed) and htmlUrl (the site) (§11)" $where . -}}
+      {{- end -}}
+    {{- end -}}
+    {{- range $attr := slice "xmlUrl" "htmlUrl" -}}
+      {{- with index $f $attr -}}
+        {{- $u := urls.Parse . -}}
+        {{- if or (not (in (slice "http" "https") $u.Scheme)) (not $u.Host) -}}
+          {{- errorf "blyg: %s %s %q isn't an absolute http(s) URL -- the blogroll is read from other origins, so nothing in it can be relative" $where $attr . -}}
+        {{- end -}}
+      {{- end -}}
+    {{- end -}}
+    {{- if in $seen $f.xmlUrl -}}
+      {{- errorf "blyg: %s lists %s a second time" $where $f.xmlUrl -}}
+    {{- end -}}
+    {{- $seen = $seen | append $f.xmlUrl -}}
+    {{- /* OPML 2.0: for a subscription, title "should not be omitted" and is
+           "probably the same as text" -- so both carry the display title. */ -}}
+    {{- $text := transform.XMLEscape $f.text -}}
+    {{- $outlines = $outlines | append (printf `    <outline type="rss" text="%s" title="%s" xmlUrl="%s" htmlUrl="%s"/>`
+        $text $text (transform.XMLEscape $f.xmlUrl) (transform.XMLEscape $f.htmlUrl)) -}}
+  {{- end -}}
+  {{- $opml := printf "%s\n%s\n%s\n%s\n%s\n%s\n%s\n"
+      `<?xml version="1.0" encoding="UTF-8"?>`
+      `<opml version="2.0">`
+      (printf `  <head><title>%s</title></head>` (transform.XMLEscape $title))
+      `  <body>`
+      (delimit $outlines "\n")
+      `  </body>`
+      `</opml>` -}}
+  {{- $r := resources.FromString "blyg/blogroll.opml" $opml -}}
+  {{- $_ := $r.RelPermalink -}}
+  {{- $published = "blogroll.opml" -}}
+{{- end -}}
+
+{{- return $published -}}
