@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-05T12:00:00Z",
+  "blyg": "0.2",
+  "content_hash": "sha256:0842b8fac78c51aa9807fdf042312a60941cd74a7f3621d7587ff3d07025274b",
+  "content_html": "<p>A fragment that gets revised. This first version is pinned, so it keeps\na page of its own however the fragment changes.</p>\n",
+  "content_md": "A fragment that gets revised. This first version is pinned, so it keeps\na page of its own however the fragment changes.\n",
+  "id": "75znj6f4rhcm9skpr2009yeqtz",
+  "kind": "fragment",
+  "note": null,
+  "origin": "https://example.org/blyg/",
+  "pinned": true,
+  "version": 1
+}
