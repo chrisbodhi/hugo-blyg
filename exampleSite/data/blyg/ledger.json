@@ -96,5 +96,35 @@
     "path": "content/blyg/2026-09-04-generated-fragment.md",
     "version": 1,
     "withdrawn": false
+  },
+  "75znj6f4rhcm9skpr2009yeqtz": {
+    "changelog": [
+      {
+        "at": "2026-09-05T12:00:00Z",
+        "kind": "fragment",
+        "note": null,
+        "pinned": true,
+        "version": 1
+      },
+      {
+        "at": "2026-09-28T14:53:46Z",
+        "kind": "fragment",
+        "note": "Revised, and pinned again",
+        "pinned": true,
+        "version": 2
+      },
+      {
+        "at": "2026-09-28T14:53:46Z",
+        "kind": "fragment",
+        "note": "Revised again, not pinned",
+        "version": 3
+      }
+    ],
+    "created": "2026-09-05T12:00:00Z",
+    "kind": "fragment",
+    "last_hash": "sha256:a2f5031375cd123ab20333195d77e042a32a1ee5bfc2a24729611eaea387c427",
+    "path": "content/blyg/2026-09-05-revised-fragment.md",
+    "version": 3,
+    "withdrawn": false
   }
 }

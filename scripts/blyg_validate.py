@@ -537,11 +537,20 @@ def permalink(origin: str, blyg_id: str, kind: str) -> str:
     return f"{origin}{'f' if kind == 'fragment' else 't'}/{blyg_id}/"
 
 
+# The version line's data-* attributes: the channel the version stepper
+# (assets/blyg/version-nav.js) reads, which names versions. Only a
+# p.version-line's count: the script reads nothing else, and data-item in
+# particular is a common name for a theme's own attributes.
+VERSION_DATA = ("data-item", "data-live", "data-pins")
+
+
 class _PageCollector(html.parser.HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.rels: dict[str, list[str]] = {}  # <link rel> -> hrefs
         self.hrefs: list[str] = []            # every href on the page
+        self.anchors: list[str] = []          # the plain <a href> links among them
+        self.version_data: list[dict] = []    # each version line's VERSION_DATA attributes
         self.refresh: str | None = None
 
     def handle_starttag(self, tag, attrs):
@@ -551,6 +560,11 @@ class _PageCollector(html.parser.HTMLParser):
                 self.rels.setdefault(rel, []).append(a.get("href") or "")
         if a.get("href"):
             self.hrefs.append(a["href"])
+            if tag == "a":
+                self.anchors.append(a["href"])
+        if ("version-line" in (a.get("class") or "").split()
+                and any(k in a for k in VERSION_DATA)):
+            self.version_data.append({k: a.get(k) for k in VERSION_DATA})
         if tag == "meta" and (a.get("http-equiv") or "").lower() == "refresh":
             self.refresh = (a.get("content") or "").partition("url=")[2] or None
 
@@ -631,8 +645,11 @@ def check_pages(public_blyg: Path, ledger: dict, docs: dict, origin: str,
     """§8.4 and §4's human-readable HTML, when the build wrote it: every
     item has its live permalink page; a pinned page exists exactly for
     each pin (404 otherwise), carrying the pin's content_html unaltered
-    and linking its JSON twin; and no page anywhere links a version the
-    origin doesn't promise forever -- the live one and pins (§8.4).
+    and linking its JSON twin; every pin is a plain link from its item's
+    live page, so each stays reachable with JavaScript off; and no page
+    anywhere links a version the origin doesn't promise forever -- the
+    live one and pins (§8.4) -- or names one in the version line's data-*
+    attributes, the channel the version stepper reads.
 
     The pages render inside the site's own baseof.html, so rel="canonical"
     is the site's head's to emit: it's checked where present (a wrong one
@@ -669,11 +686,15 @@ def check_pages(public_blyg: Path, ledger: dict, docs: dict, origin: str,
                 pin = json.loads(pin_json.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue  # check_pins reports it
-            pw = permalink(origin, blyg_id, pin.get("kind"))[len(origin):] + f"v{n}/index.html"
+            pin_page = permalink(origin, blyg_id, pin.get("kind")) + f"v{n}/"
+            pw = pin_page[len(origin):] + "index.html"
             if not (public_blyg / pw).is_file():
                 problems.add(pw, f"missing -- {blyg_id} v{n} is pinned, and a pinned page "
                                  f"MUST return 200 forever once served (§8.4 rule 1)")
                 continue
+            if pin_page not in page.anchors:
+                problems.add(where, f"doesn't link {pin_page} -- every pinned version stays a "
+                                    f"plain link away, JavaScript or not")
             ptext, ppage = _page(public_blyg / pw)
             if not carries(ptext, pin.get("content_html", "")):
                 problems.add(pw, "MUST carry the pinned version's publish-time content_html "
@@ -720,13 +741,43 @@ def check_pages(public_blyg: Path, ledger: dict, docs: dict, origin: str,
     for path in pages:
         if not path.is_file():
             continue
+        where = str(path.relative_to(public_blyg))
         _, page = _page(path)
         for href in page.hrefs:
             m = version_link.match(href)
             if m and (m.group(1), int(m.group(2))) not in pinned:
-                problems.add(str(path.relative_to(public_blyg)),
-                             f"links {href}, an unpinned version -- a version display MUST "
-                             f"NOT offer access to unpinned history (§8.4)")
+                problems.add(where, f"links {href}, an unpinned version -- a version display MUST "
+                                    f"NOT offer access to unpinned history (§8.4)")
+        for data in page.version_data:
+            check_version_data(where, data, ledger, pinned, problems)
+
+
+def check_version_data(where: str, data: dict, ledger: dict, pinned: set,
+                       problems: Problems) -> None:
+    """The version line's data-* attributes (VERSION_DATA) are only a
+    DOM-to-script channel for the version stepper, but a script turns
+    whatever they name into a fetch and a page. So, like a link, they may
+    name only versions the origin promises forever: the item's live one
+    (data-live) and its pins (data-pins) -- §8.4."""
+    blyg_id = data.get("data-item")
+    entry = ledger.get(blyg_id)
+    if entry is None:
+        problems.add(where, f"a version line's data-item is {blyg_id!r}, not an item in the ledger")
+        return
+    named = [("data-live", data.get("data-live"))]
+    named += [("data-pins", v) for v in (data.get("data-pins") or "").split(",") if v]
+    for attr, value in named:
+        if value is None or not re.fullmatch(r"[1-9][0-9]*", value.strip()):
+            problems.add(where, f"{blyg_id}'s {attr} is {value!r}, not a version number")
+            continue
+        n = int(value)
+        if attr == "data-live" and n != entry["version"]:
+            problems.add(where, f"{blyg_id}'s data-live is v{n}, but its live version is "
+                                f"v{entry['version']}")
+        if n != entry["version"] and (blyg_id, n) not in pinned:
+            problems.add(where, f"{blyg_id}'s {attr} names v{n}, an unpinned version -- a "
+                                f"version display MUST NOT offer access to unpinned history, "
+                                f"to a script any more than in a link (§8.4)")
 
 
 def check_feed(public_blyg: Path, ledger: dict, docs: dict, manifest: dict,

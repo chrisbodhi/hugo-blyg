@@ -1,0 +1,11 @@
+{{- /*
+  A version's changelog note (p.version-note), in quotes, or nothing when
+  the version has none. The note belongs to its version: the version
+  stepper swaps it with the body, and hides it (the hidden attribute, not
+  an empty element) while the version shown has none.
+
+    {{ partial "blyg/view/version-note.html" $m.note }}
+*/ -}}
+{{- with . }}
+<p class="version-note">&ldquo;{{ . }}&rdquo;</p>
+{{- end -}}

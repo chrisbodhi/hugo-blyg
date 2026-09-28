@@ -1,0 +1,26 @@
+{{- /*
+  The version stepper (assets/blyg/version-nav.js), the one script the
+  module ships: a progressive enhancement that lets a reader step an
+  item between its live version and its pins in place. Everything it
+  offers is also a plain link without it.
+
+    {{ partial "blyg/view/script.html" (dict "items" $models) }}
+
+  Emitted only where there's something to step: a page with pages on and
+  a live item with at least one pinned version besides the live one.
+  Override this partial with an empty file to ship no script at all.
+*/ -}}
+{{- $step := false -}}
+{{- range .items -}}
+  {{- $m := . -}}
+  {{- if and $m.pages (not $m.withdrawn) -}}
+    {{- range $m.pins -}}
+      {{- if ne (int .version) $m.version -}}{{- $step = true -}}{{- end -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- if $step -}}
+  {{- with resources.Get "blyg/version-nav.js" | minify | fingerprint }}
+<script src="{{ .RelPermalink }}" integrity="{{ .Data.Integrity }}" defer></script>
+  {{- end -}}
+{{- end -}}

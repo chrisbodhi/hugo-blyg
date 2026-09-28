@@ -307,7 +307,7 @@ def page(canonical, body="", links=()):
 
 
 class PageTests(SurfaceTests):
-    """The HTML pages partials/blyg/pages.html writes (§4, §8.4)."""
+    """The HTML pages layouts/blyg/ and the content adapter write (§4, §8.4)."""
 
     LIVE = f"{ORIGIN}t/{ID}/"
 
@@ -393,6 +393,69 @@ class PageTests(SurfaceTests):
     def test_linking_an_unpinned_version_fails(self):
         self.pages["index.html"] = page(ORIGIN, links=[f"{ORIGIN}items/{ID}/v1.json"])
         self.assertTrue(any("unpinned history" in p for p in self.problems()))
+
+    def test_live_page_must_link_each_pin(self):
+        # With JavaScript off, the version line's citations are the only
+        # way to a pinned page, so they have to be plain <a href> links.
+        self.pin_v1()
+        self.pages[f"t/{ID}/index.html"] = page(self.LIVE, "<p>Body.</p>")
+        self.assertTrue(any("plain link" in p for p in self.problems()))
+        # A <link> to it isn't one.
+        self.pages[f"t/{ID}/index.html"] = page(
+            self.LIVE, f'<link rel="alternate" href="{self.LIVE}v1/"><p>Body.</p>')
+        self.assertTrue(any("plain link" in p for p in self.problems()))
+
+    def version_line(self, **data):
+        attrs = "".join(f' data-{k}="{v}"' for k, v in data.items())
+        return f'<p class="version-line"{attrs}><span class="vlabel">v1</span></p>'
+
+    def test_version_data_may_name_the_live_version_and_pins(self):
+        self.pin_v1()
+        self.pages[f"t/{ID}/index.html"] = page(
+            self.LIVE, "<p>Body.</p>" + self.version_line(item=ID, live=1, pins=1),
+            [f"{self.LIVE}v1/"])
+        self.assertEqual(self.problems(), [])
+
+    def test_version_data_naming_an_unpinned_version_fails(self):
+        self.pages["index.html"] = page(ORIGIN, self.version_line(item=ID, live=1, pins="1,2"))
+        problems = self.problems()
+        self.assertTrue(any("data-pins names v2, an unpinned version" in p for p in problems),
+                        problems)
+
+    def test_version_data_live_must_be_the_live_version(self):
+        self.pin_v1()
+        self.ledger[ID]["version"] = 2
+        self.ledger[ID]["changelog"].append(
+            {"version": 2, "at": "2026-01-02T00:00:00Z", "note": None, "kind": "thread"})
+        self.docs[ID] = item_doc(ID, version=2)
+        self.docs[ID]["changelog"][0]["pinned"] = True
+        self.pages[f"t/{ID}/index.html"] = page(
+            self.LIVE, "<p>Body.</p>" + self.version_line(item=ID, live=1, pins=1),
+            [f"{self.LIVE}v1/"])
+        problems = self.problems()
+        self.assertTrue(any("data-live is v1, but its live version is v2" in p for p in problems),
+                        problems)
+
+    def test_version_data_must_name_a_ledger_item_and_versions(self):
+        self.pages["index.html"] = page(ORIGIN, self.version_line(item="nope", live=1))
+        self.assertTrue(any("not an item in the ledger" in p for p in self.problems()))
+        self.pages["index.html"] = page(ORIGIN, self.version_line(item=ID, live="v1"))
+        self.assertTrue(any("not a version number" in p for p in self.problems()))
+
+    def test_data_attributes_outside_a_version_line_are_not_checked(self):
+        # The stepper reads only .version-line[data-item]; a theme's own
+        # data-item is none of the validator's business.
+        self.pages["index.html"] = page(
+            ORIGIN, '<nav data-item="menu" data-live="yes"></nav><p>Body.</p>')
+        self.assertEqual(self.problems(), [])
+
+    def test_a_transclusions_data_attributes_are_not_the_version_line(self):
+        # data-blyg-version is a wire token in content_html naming the
+        # quoted fragment's version (§10.2), pinned or not.
+        self.pages["index.html"] = page(
+            ORIGIN, f'<blockquote class="blyg-transclusion" data-blyg-id="{ID}" '
+                    f'data-blyg-version="7"><p>Q.</p></blockquote>')
+        self.assertEqual(self.problems(), [])
 
     def test_redirect_only_from_a_kind_the_item_had(self):
         self.pages[f"f/{ID}/index.html"] = (

@@ -1,0 +1,19 @@
+{{- /*
+  When an item was published (p.timestamps): "Created", plus "Most
+  recent", with its version, once there's more than one. A pinned page
+  says only when its version was published.
+
+    {{ partial "blyg/view/timestamps.html" (dict "model" $m) }}
+    {{ partial "blyg/view/timestamps.html" (dict "model" $m "pin" $pin) }}
+*/ -}}
+{{- $m := .model }}
+<p class="timestamps">
+{{- with .pin -}}
+<span>Published: {{ partial "blyg/view/date.html" .at }}</span>
+{{- else -}}
+<span>Created: {{ partial "blyg/view/date.html" $m.created }}</span>
+{{- if gt $m.version 1 }}<br>
+<span>Most recent: {{ partial "blyg/view/date.html" $m.updated }}, v{{ $m.version }}</span>
+{{- end -}}
+{{- end -}}
+</p>

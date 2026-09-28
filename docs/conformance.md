@@ -70,7 +70,14 @@ marked with the module's `blyg-gen` shortcode and disclosed as
       (`layouts/blyg/section.html`), and the item and pinned pages come
       from the module's content adapter (`content/blyg/_content.gotmpl`),
       built but never listed (on unless `[params.blyg] pages = false`).
-      Presentation, not protocol, except where §8.4 says otherwise (below).
+      Presentation, not protocol, except where §8.4 says otherwise (below),
+      and so the pages change no protocol surface: with pages on and off,
+      every surface under `blyg/` comes out byte-identical, `feed.xml`
+      apart from each entry's `<link>` to its page (§7's example has one).
+      *(`tests/surfaces_e2e.sh` builds both in CI and compares.)*
+      Their markup follows the reference client's CSS contract
+      (blygger-spec `docs/css-contract.md`) and ships no CSS; the two wire
+      classes (§1 there) are `content_html`'s own and pass through untouched.
 
 ## §5 — The item document (`items/{id}.json`)
 
@@ -258,7 +265,20 @@ marked with the module's `blyg-gen` shortcode and disclosed as
       at access to unpinned history. An item page's version line is the
       live version plus pin citations ("v6 · pinned: v2, v4"), nothing
       else; `blyg_validate.py` fails any built page that links a
-      `v{n}/` page or `v{n}.json` file for an unpinned version.
+      `v{n}/` page or `v{n}.json` file for an unpinned version, or whose
+      version line's `data-*` attributes (`data-item`, `data-live`,
+      `data-pins`: the channel the version stepper reads) name one. A
+      transclusion's `data-blyg-version` is `content_html`'s provenance
+      (§10.2), not a version display, and isn't checked.
+- [ ] The version stepper (`assets/blyg/version-nav.js`), the pages' one
+      script, presents pins in place (§8.4 MAY): it steps an item only
+      through its pins and its live version, marks a shown pin frozen in
+      text ("v2 · frozen"), fetches nothing but the pins'
+      `items/{id}/v{n}.json`, and doesn't run on a pinned page or a
+      withdrawal endcap. It's an enhancement only: every pin is a plain
+      `<a href>` from its item's live page, which `blyg_validate.py`
+      checks. *(`tests/stepper_e2e.sh` drives it in headless Chromium in
+      CI, with JavaScript on and off.)*
 - [ ] `blyg_stamp.py pin <id>` refuses to pin unless the built
       `public/blyg/items/{id}.json` version matches the ledger version.
       Verified end to end: pinning v1, then bumping to v2, then
@@ -283,7 +303,8 @@ marked with the module's `blyg-gen` shortcode and disclosed as
         `blyg_validate.py` (`carries`) compares markup rather than bytes;
         the JSON twin stays the byte-exact citation.
       - a visible frozen-snapshot banner and a link to the `v{n}.json`
-        twin (rule 3, SHOULD). `rel="canonical"` to the live permalink
+        twin (rule 3, SHOULD); "frozen" is in the page's text, not only
+        its classes, so it reads without a stylesheet. `rel="canonical"` to the live permalink
         is the site's head's to emit, from `.Params.blyg_canonical`; the
         validator checks it where present.
       - not publish events: they appear in neither `feed.xml` nor

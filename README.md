@@ -29,9 +29,10 @@ for the scripts.
 ## Setup
 
 Hugo Modules merge an imported module's `content/`, `layouts/`, `data/`,
-`static/`, `archetypes/`, and `i18n/` into the site's own filesystem
-automatically (this module's `content/` holds only the content adapter
-that adds the blyg pages).
+`static/`, `assets/`, `archetypes/`, and `i18n/` into the site's own
+filesystem automatically (this module's `content/` holds only the
+content adapter that adds the blyg pages, and its `assets/` only the
+version stepper's script).
 They do **not** merge a module's own `hugo.toml`/`config.toml` — site-wide
 configuration (`[outputFormats]`, `[mediaTypes]`, `[outputs]`, `[params]`)
 has to be declared by whatever site imports this module (verified
@@ -537,27 +538,58 @@ page's `<title>` is the first line of the item's text, since items have
 no title of their own. Each `feed.xml` entry's `<link>` is its item's
 live page.
 
-An item page shows the live content and a version line citing only the
-live version and the pins, like "v6 · pinned: v2, v4": §8.4 forbids any
-page offering or implying access to unpinned history, so there is no
-version list. A withdrawn item's page stays up, says it was withdrawn,
-and still cites its pins. The permalink follows the item's authored
-kind, so an item whose kind changes moves between `f/` and `t/`, and the
-old address becomes an alias that redirects to it.
+Every item, on the feed page and on its own page, is its content
+followed by a metadata block:
+
+- the **version line**, citing only the live version and the pins, like
+  "v6 · pinned: v2, v4", each pin a plain link to its pinned page: §8.4
+  forbids any page offering or implying access to unpinned history, so
+  there is no version list. An item with one version and no pins has
+  nothing to cite, and no version line;
+- the live version's changelog **note**, in quotes, when it has one;
+- **Created**, and, once there's a v2, **Most recent** with its version;
+- **Permalink**.
+
+On the feed page an `<hr>` separates each item from the next, and a
+fragment shows in full. A thread is cut short to a
+card: an italic *thread* label, then its own text as plain text up to its
+first transclusion (the quote is someone else's words, and flattened
+into an excerpt it would read as the thread's), capped at 300
+characters, then "read the thread →". A withdrawn item's page stays up,
+says it was withdrawn, and still cites its pins. The permalink follows
+the item's authored kind, so an item whose kind changes moves between
+`f/` and `t/`, and the old address becomes an alias that redirects to it.
 
 A pinned page is built from the pin file, never re-rendered: its
 content is that version's publish-time `content_html` (§8.4 rule 2),
-marked as a frozen snapshot, and it links the live page and its
-`v{n}.json` twin (rule 3). Built with `hugo --minify`, the page is
-minified like every other page on the site, which changes the bytes'
-spelling (quotes, whitespace) but not one element, attribute or word
-of the content; `blyg_validate.py` compares it that way, and the JSON
-twin remains the byte-exact citation. This is also where the templates
-read pins back: a pin the ledger records whose
-`static/blyg/items/{id}/v{n}.json` is missing, or names another id or
-version, fails the build, since a pin MUST return 200 forever (§8). The
+marked as a frozen snapshot in its text as well as its classes (a banner
+saying "Pinned v2 — a frozen snapshot from …", and "v2 · frozen" on its
+version line), and it links the live page and its `v{n}.json` twin
+(rule 3). Built with `hugo --minify`, the page is minified like every
+other page on the site, which changes the bytes' spelling (quotes,
+whitespace) but not one element, attribute or word of the content;
+`blyg_validate.py` compares it that way, and the JSON twin remains the
+byte-exact citation. This is also where the templates read pins back:
+a pin the ledger records whose `static/blyg/items/{id}/v{n}.json` is
+missing, or names another id or version, fails the build, since a pin MUST return 200 forever (§8). The
 module reads pins from the site root's `static/`, which is where
 `blyg_stamp.py pin` writes them by default.
+
+**The version stepper** is the module's one script
+(`assets/blyg/version-nav.js`, published fingerprinted under `/blyg/`),
+a progressive enhancement ported from the reference client. On an item
+with a pin besides its live version, it adds ‹ › buttons to the version
+line that step the item in place between its pins and its live version,
+swapping the body and the note (the note is hidden, not emptied, for a
+version without one), plus "open this version ↗" and "back to latest"
+while a pin is shown; a plain click on a pin citation shows that pin in
+place, too. It fetches nothing but the pins' `items/{id}/v{n}.json`,
+reads which versions exist from the version line's `data-*` attributes
+(which name only the live version and pins; `blyg_validate.py` checks),
+and doesn't run on a pinned page or a withdrawn item. Without it, every
+pin is still a plain link away. The script tag is emitted only on pages
+with something to step; override `partials/blyg/view/script.html` with
+an empty file to ship none.
 
 **The `<head>`** is the site's. Two things there are worth adding (setup
 step 5):
@@ -572,18 +604,69 @@ step 5):
   `blyg_validate.py` checks a canonical link wherever there is one, and
   doesn't require one.
 
-**Styling** is the site's too. The content (`partials/blyg/html/main.html`)
-comes unstyled, with classes to hook: `blyg-feed`, `blyg-item`,
-`blyg-meta`, `blyg-frozen` (the pinned-snapshot banner), and the wire
-tokens `blyg-transclusion` and `blyg-tk-gen`. Override `main.html` in the
-site's own `layouts/partials/blyg/html/` to change what the pages say.
-Keep what §8.4 requires of a pinned page: the pin's `content_html`
-untouched, the frozen marking, and the link to its JSON twin.
+**Styling** is the site's too: the module ships no CSS, and the pages
+read in order without any. Their markup uses the blygger reference
+client's class vocabulary ([`docs/css-contract.md`](https://github.com/blygger/blygger-spec/blob/c5884b9214b6972c3aed2fecf9aae68c9eab5267/docs/css-contract.md)
+in blygger-spec, at the commit `docs/conformance.md` pins), so a theme
+written against that contract styles these pages as well:
+
+| Class | What it marks |
+|---|---|
+| `div.blyg` | the whole of each blyg page's content, inside the site's `main` |
+| `article.fragment`, `article.thread` | one item, by kind (a pinned page's by the kind that version had) |
+| `article.fragment.thread-card` | a thread's card on the feed page (the reference client's class for it) |
+| `article.fragment.withdrawn` | a withdrawn item's endcap; bare `.withdrawn` for "Nothing published yet." |
+| `div.item-content` | the item's published `content_html`, untouched: everything outside it is apparatus |
+| `p.version-line`, `span.vlabel`, `span.pins` | the version line, its version, its pin citations |
+| `p.version-note` | a version's note |
+| `p.timestamps` | Created / Most recent, or a pinned page's Published |
+| `a.permalink` | the Permalink link |
+| `.kind-chip` | the italic *thread* label on a thread's card |
+| `.pinned-banner` | a pinned page's frozen-snapshot banner |
+| `.vnav`, `.vstep`, `.vlatest`, `.vextra`, `article.showing-pin` | added by the version stepper, so they exist only with JavaScript on; never depend on them |
+| `blockquote.blyg-transclusion`, `.blyg-tk-gen` | wire tokens inside `content_html` (§10.2, §5.7): style them freely, but a transclusion has to keep reading as quoted material |
+
+Each item also uses `header` (a pinned page's banner) and `footer` (its
+metadata block), and each `time` element carries its ISO 8601 timestamp.
+On the feed page an `<hr>` sits between items, so they read apart
+without a stylesheet; `.blyg > hr { display: none }` hides it.
+`.stub-cite`, the reference client's "In response to" line, will sit
+above an item's `div.item-content` once protocol 0.3's stubs are built.
+
+To change what the pages say, override a partial in the site's own
+`layouts/partials/blyg/view/`. Each piece is its own, so a site can
+replace one without taking over the rest:
+
+| Partial | Renders |
+|---|---|
+| `view/feed.html` | the feed page: its heading, the entries with an `<hr>` between them, the stepper |
+| `view/entry.html` | one item on the feed page: a fragment, or a thread's card |
+| `view/excerpt.html` | a thread card's text (returns plain text) |
+| `view/item.html` | an item's live page, or its withdrawal endcap |
+| `view/pin.html` | a pinned version's page |
+| `view/meta.html` | an item's metadata block, from the four below |
+| `view/version-line.html` | the version line |
+| `view/version-note.html` | a version's note |
+| `view/timestamps.html` | the timestamps |
+| `view/permalink.html` | the Permalink link |
+| `view/pinned-banner.html` | a pinned page's banner |
+| `view/date.html` | every date, as `<time>`, in the site's language (`:date_long`) |
+| `view/script.html` | the version stepper's script tag |
+
+They all take the item's *model* (`view/model.html`: its id, kind,
+versions, note, dates, URLs and pins, gathered once). An override of
+`view/pin.html`, `view/pinned-banner.html` or `view/version-line.html`
+has to keep what §8.4 asks of a pinned page: the pin's `content_html`
+untouched, the frozen marking, and the link to its JSON twin; and a
+version line may name, in text, links or `data-*` attributes, only the
+live version and pins.
 
 To turn the item pages off, set `pages = false` under `[params.blyg]`
 (and drop `"html"` from the section's `outputs` if the feed page should
 go too). Only do that on a site that has never served them with a pin:
-a pinned page, once served, MUST keep returning 200 (§8.4 rule 1).
+a pinned page, once served, MUST keep returning 200 (§8.4 rule 1). With
+pages off, the feed page shows threads in full, cites pins by their
+JSON files, and runs no stepper.
 
 ## Generation provenance
 
@@ -652,6 +735,8 @@ hugo --minify
 python3 ../scripts/blyg_validate.py
 ../tests/transclusion_e2e.sh                   # §10.4, on a scratch copy
 ../tests/pages_e2e.sh                          # §8.4, likewise
+../tests/surfaces_e2e.sh                       # pages on/off change no surface
+../tests/stepper_e2e.sh                        # the stepper, in Chromium
 ```
 
 `exampleSite/go.mod` replaces the module with this checkout, so it always
@@ -660,10 +745,16 @@ an unstamped body edit fails `hugo`. `transclusion_e2e.sh` edits and then
 withdraws the fragment that `exampleSite`'s transcluding thread quotes,
 rebuilding each time, and fails unless the thread's built `content_html`
 stays byte-identical until the thread is itself re-stamped.
-`pages_e2e.sh` edits, re-kinds and withdraws `exampleSite`'s fragment,
-whose v1 is pinned, and fails unless the pinned page's content stays the
+`pages_e2e.sh` edits, re-kinds and withdraws `exampleSite`'s first
+fragment, whose v1 is pinned, and fails unless the pinned page's content stays the
 pin's `content_html` throughout, the live page moves with the kind, and
-deleting the pin file fails the build.
+deleting the pin file fails the build. `surfaces_e2e.sh` builds
+`exampleSite` with pages on and off, and fails unless every protocol
+surface comes out byte-identical, `feed.xml` apart from its entries'
+`<link>`s. `stepper_e2e.sh` serves a build and drives the version
+stepper in headless Chromium through `exampleSite`'s revised fragment
+(v1 and v2 pinned, v3 live), with JavaScript on and off; it needs Node
+and the `playwright` npm package.
 
 To try a change against a real site before tagging it, point that site's
 `go.mod` at a local checkout — the same `go list` recipe under "Scripts"

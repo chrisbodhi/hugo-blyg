@@ -4,13 +4,10 @@
   on by adding "html" to the section's `outputs` in content/blyg/_index.md.
   Only "main" is defined here, so the site's baseof.html supplies the page
   around it. It lists the 50 most recently updated live items, newest
-  first, each linking its permalink page.
+  first; partials/blyg/view/feed.html says how.
 */ -}}
 {{- define "main" -}}
 {{- $ledger := site.Data.blyg.ledger -}}
-{{- $base := site.BaseURL -}}
-{{- /* With [params.blyg] pages = false there are no item pages to link. */ -}}
-{{- $linked := partial "blyg/pages-enabled.html" . -}}
 {{- $items := slice -}}
 {{- range .Pages -}}
   {{- $page := . -}}
@@ -18,13 +15,11 @@
     {{- $id := . -}}
     {{- with index $ledger $id -}}
       {{- if not .withdrawn -}}
-        {{- $doc := partialCached "blyg/item.html" (dict "page" $page "ledger" . "base" $base) $id -}}
-        {{- $items = $items | append (dict "doc" $doc
-            "permalink" (cond $linked (partial "blyg/permalink.html" (dict "id" $id "kind" .kind "base" $base)) "")) -}}
+        {{- $doc := partialCached "blyg/item.html" (dict "page" $page "ledger" . "base" site.BaseURL) $id -}}
+        {{- $items = $items | append (partial "blyg/view/model.html" (dict "id" $id "entry" . "doc" $doc)) -}}
       {{- end -}}
     {{- end -}}
   {{- end -}}
 {{- end -}}
-{{ partial "blyg/html/main.html" (dict "page" "index" "title" .Title
-    "items" (first 50 (sort $items "doc.updated" "desc"))) }}
+{{ partial "blyg/view/feed.html" (dict "title" .Title "items" (first 50 (sort $items "updated" "desc"))) }}
 {{- end -}}

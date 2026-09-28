@@ -1,0 +1,9 @@
+{{- /*
+  The item's live permalink (p > a.permalink), or nothing on a site
+  without pages, where there's no page to link.
+
+    {{ partial "blyg/view/permalink.html" $m }}
+*/ -}}
+{{- with .live }}
+<p><a class="permalink" href="{{ . }}">Permalink</a></p>
+{{- end -}}

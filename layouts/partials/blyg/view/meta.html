@@ -1,0 +1,20 @@
+{{- /*
+  An item's metadata block, under its content: the version line, the live
+  version's note, its timestamps and its permalink, in the article's
+  <footer>. Each is its own partial, to override one at a time.
+
+    {{ partial "blyg/view/meta.html" (dict "model" $m "stepper" true) }}
+
+  A withdrawn item's block has no note (an endcap carries no content to
+  annotate) and no stepper; its pins are still cited, since they're
+  exactly what survives withdrawal (§8).
+*/ -}}
+{{- $m := .model }}
+<footer>
+{{- if or (gt $m.version 1) $m.pins }}
+{{ partial "blyg/view/version-line.html" (dict "model" $m "stepper" .stepper) }}
+{{- end }}
+{{- if not $m.withdrawn }}{{ partial "blyg/view/version-note.html" $m.note }}{{ end }}
+{{ partial "blyg/view/timestamps.html" (dict "model" $m) }}
+{{- partial "blyg/view/permalink.html" $m }}
+</footer>

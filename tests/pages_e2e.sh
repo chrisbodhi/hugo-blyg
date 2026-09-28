@@ -4,7 +4,8 @@
 # stays byte-identical to the pin through an edit, a kind change and a
 # withdrawal (its chrome -- the links to the live page -- may follow the
 # item, §8.4 rule 2); the live page moves with the kind (leaving a
-# redirect) and cites only the pin; and a recorded pin whose file is gone
+# redirect) and cites only the pin; a withdrawn item's endcap still cites
+# it, with no version stepper; and a recorded pin whose file is gone
 # fails the build.
 #
 # Run from anywhere (GNU sed); needs hugo, go and python3 on PATH. CI runs it.
@@ -41,8 +42,8 @@ pin = json.load(open(sys.argv[3], encoding="utf-8"))["content_html"]
 sys.exit(0 if blyg_validate.carries(page, pin) else 1)
 PY
 }
-versions() {  # the version line of a live page, tags stripped
-  grep -o '<p class="\?blyg-meta"\?>v[^<]*\(<a [^>]*>[^<]*</a>\)*' "$1" | sed 's/<[^>]*>//g'
+versions() {  # the version line (p.version-line) of a live page, tags stripped
+  sed -n 's#.*<p class="\?version-line"\?[^>]*>##p' "$1" | sed 's#</p>.*##; s/<[^>]*>//g'
 }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -83,6 +84,10 @@ build
 frozen || fail "withdrawal changed the pinned page"
 grep -q "This item was withdrawn" "public/blyg/t/$id/index.html" \
   || fail "the live page doesn't say the item was withdrawn"
+[ "$(versions public/blyg/t/$id/index.html)" = "v4 · pinned: v1" ] \
+  || fail "the endcap doesn't still cite its pin"
+! grep -q 'data-item\|version-nav' "public/blyg/t/$id/index.html" \
+  || fail "the version stepper would run on a withdrawn item's endcap"
 echo "ok: a withdrawn item keeps its pinned page"
 
 # 4. A recorded pin whose file is gone must fail the build, not 404.

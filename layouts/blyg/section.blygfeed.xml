@@ -42,7 +42,7 @@
 {{- $ledger := site.Data.blyg.ledger -}}
 {{- $manifestURL := printf "%sblyg/blyg.json" $base -}}
 {{- /* Each entry links its item's live HTML page (§7's example), when this
-       module writes those (partials/blyg/pages.html). */ -}}
+       module writes those (partials/blyg/pages-enabled.html). */ -}}
 {{- $pages := partial "blyg/pages-enabled.html" . -}}
 
 {{- $events := slice -}}

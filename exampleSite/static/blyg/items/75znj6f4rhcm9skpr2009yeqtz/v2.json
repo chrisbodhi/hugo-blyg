@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-28T14:53:46Z",
+  "blyg": "0.2",
+  "content_hash": "sha256:f33f7a445ecbb8a63adbed0e87196674ead1aa0e06658412d951322c75c2ed0b",
+  "content_html": "<p>A fragment that gets revised. This second version is pinned too, so\nstepping through its versions visits v1, v2 and the live one.</p>\n",
+  "content_md": "A fragment that gets revised. This second version is pinned too, so\nstepping through its versions visits v1, v2 and the live one.\n",
+  "id": "75znj6f4rhcm9skpr2009yeqtz",
+  "kind": "fragment",
+  "note": "Revised, and pinned again",
+  "origin": "https://example.org/blyg/",
+  "pinned": true,
+  "version": 2
+}

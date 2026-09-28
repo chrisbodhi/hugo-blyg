@@ -1,0 +1,30 @@
+{{- /*
+  A pinned version's page (f/{id}/v{n}/, t/{id}/v{n}/), given the item's
+  model (partials/blyg/view/model.html) and the pin:
+
+    {{ partial "blyg/view/pin.html" (dict "model" $m "pin" $pin) }}
+
+  What §8.4 asks of it, and what an override has to keep: the content is
+  the version's publish-time content_html, straight from the pin file and
+  never re-rendered (rule 2); the page is visibly a frozen snapshot, in
+  its text as well as its classes, and links the live page and its
+  v{n}.json twin (rule 3). The article takes the kind that version had.
+  No stepper: this page is already one frozen version.
+*/ -}}
+{{- $m := .model -}}
+{{- $pin := .pin }}
+<div class="blyg">
+<article class="{{ $pin.kind }}">
+<header>
+{{- partial "blyg/view/pinned-banner.html" (dict "model" $m "pin" $pin) }}
+</header>
+<div class="item-content">
+{{ $pin.content_html | safeHTML }}
+</div>
+<footer>
+{{ partial "blyg/view/version-line.html" (dict "model" $m "pin" $pin) }}
+{{- partial "blyg/view/version-note.html" $pin.note }}
+{{ partial "blyg/view/timestamps.html" (dict "model" $m "pin" $pin) }}
+</footer>
+</article>
+</div>
