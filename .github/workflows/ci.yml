@@ -47,6 +47,11 @@ jobs:
       - name: Transclusion snapshots don't cascade
         run: ../tests/transclusion_e2e.sh
 
+      # §8.4, likewise: a pinned page keeps its content through an edit, a
+      # kind change and a withdrawal, and a missing pin file fails hugo.
+      - name: Pinned pages stay frozen
+        run: ../tests/pages_e2e.sh
+
       # And the build gate itself: an unstamped body edit must fail hugo,
       # not ship as a same-version stealth edit (§13.3).
       - name: Unstamped edit fails the build

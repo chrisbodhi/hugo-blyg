@@ -1,0 +1,13 @@
+{{- /*
+  Whether this module writes the human-readable HTML pages (§4 SHOULD,
+  §8.4): on unless the site sets [params.blyg] pages = false.
+*/ -}}
+{{- $on := "true" -}}
+{{- with site.Params.blyg -}}
+  {{- /* A bool from hugo.toml, a string from HUGO_PARAMS_BLYG_PAGES. */ -}}
+  {{- if isset . "pages" -}}{{- $on = printf "%v" .pages -}}{{- end -}}
+{{- end -}}
+{{- if not (in (slice "true" "false") $on) -}}
+  {{- errorf "blyg: [params.blyg] pages is %q -- it's true or false" $on -}}
+{{- end -}}
+{{- return eq $on "true" -}}

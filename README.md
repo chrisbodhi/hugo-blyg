@@ -4,7 +4,8 @@ A Hugo Module that builds the static publish-side surfaces of the
 [Blygger protocol](https://github.com/blygger/blygger-spec) v0.2, Level 1
 — `blyg.json` (manifest), `feed.xml`, `items/index.json` (archive index),
 `items/{id}.json` (canonical item documents), and, optionally,
-`blogroll.opml` (§11) — from a section of
+`blogroll.opml` (§11) — plus human-readable HTML pages for the feed,
+each item, and each pinned version (§4, §8.4), from a section of
 ordinary Hugo Markdown content plus a small JSON ledger.
 
 It comes in three parts:
@@ -78,7 +79,7 @@ outputs = ["blygmanifest", "blygfeed"]
   [cascade.target]
     kind = "page"
   [cascade.build]
-    render = "never"   # no live HTML permalink pages yet
+    render = "never"   # hugo-blyg writes item pages itself
     list = "always"    # but still enumerable via .Pages
 +++
 ```
@@ -88,7 +89,9 @@ outputs = ["blygmanifest", "blygfeed"]
 section (e.g. a site's `/blog/`, too), and this module's output formats
 have no business running there. The cascade is scoped to `kind = "page"`
 so the section page itself, which is where the surfaces are built, still
-renders.
+renders. Items' own Hugo pages never render: their URLs would come from
+file names, and an item's permalink comes from its id, so the module
+writes those pages itself (see "HTML pages").
 
 **4. A `<link rel="blyg">`** in every page's `<head>` (§12.1 step 4),
 pointing at the section, so resolving a page never depends on probing
@@ -247,6 +250,10 @@ working directory.
   compares against the ledger on the branch the site deploys from,
   `--published-ref` (default `origin/master`; pass `origin/main` if that's
   yours).
+- `scripts/blyg_stamp.py pin <id>` pins an item's live version (§8):
+  build first, then pin, then commit the new
+  `static/blyg/items/{id}/v{n}.json` along with the ledger and rebuild
+  to publish its page. A pin is irrevocable.
 - `scripts/blyg_validate.py` checks the built `public/blyg/` against the
   ledger and the spec; a site's CI runs it after `hugo`.
 - `scripts/blyg_from_issue.py` backs the action below.
@@ -478,17 +485,65 @@ There's no need to mark a feed as a blyg; a reader resolving its
 With at least one entry, the build publishes `blogroll.opml` and adds
 `"blogroll": "blogroll.opml"` to `blyg.json`. With none, or no file,
 there is neither (§11: a blyg with nothing to show serves no blogroll).
-§11 also asks for `<link rel="blogroll" href="…/blyg/blogroll.opml">`
-on the site's HTML feed page, if it has one; that page is the site's
-own, so the link is too.
+The feed page (see "HTML pages") carries the `<link rel="blogroll">`
+§11 asks for.
+
+## HTML pages
+
+§4 says publishers SHOULD serve human-readable HTML next to the JSON,
+and the module writes it, fanned out from the manifest template like
+`items/{id}.json`, so a site needs no config for it:
+
+| Path under the origin | Page |
+|---|---|
+| `index.html` | the feed page: the 50 most recently updated live items, newest first |
+| `f/{id}/`, `t/{id}/` | an item's live permalink: a fragment's under `f/`, a thread's under `t/` (§8.4's paths) |
+| `f/{id}/v{n}/`, `t/{id}/v{n}/` | a pinned version (§8.4), only while version *n* is pinned |
+
+Every page carries `<link rel="blyg">` (§12.1) and the feed's
+`rel="alternate"`. Each `feed.xml` entry's `<link>` is its item's live
+page, and the feed page links the blogroll when one is served.
+
+An item page shows the live content and a version line citing only the
+live version and the pins, like "v6 · pinned: v2, v4": §8.4 forbids any
+page offering or implying access to unpinned history, so there is no
+version list. A withdrawn item's page stays up, says it was withdrawn,
+and still cites its pins. The permalink follows the item's authored
+kind, so an item whose kind changes moves between `f/` and `t/` and
+leaves a redirect at the old address.
+
+A pinned page is built from the pin file, never re-rendered: its
+content is that version's publish-time `content_html`, verbatim
+(§8.4 rule 2), and it is marked as a frozen snapshot, is
+`rel="canonical"` to the live page, and links its `v{n}.json` twin
+(rule 3). `hugo --minify` doesn't rewrite `resources.FromString` output
+(checked against Hugo 0.151.0), so the bytes survive a minified build.
+This is also where the templates read pins back: a pin the ledger
+records whose `static/blyg/items/{id}/v{n}.json` is missing, or names
+another id or version, fails the build, since a pin MUST return 200
+forever (§8). The module reads pins from the site root's `static/`,
+which is where `blyg_stamp.py pin` writes them by default.
+
+Pages are presentation, so every part can be overridden from the site's
+own `layouts/partials/blyg/html/`: `page.html` is the document around
+the content (head, styles, chrome), `main.html` is the content of each
+page, and `redirect.html` is the moved-permalink stub. Keep what §8.4
+requires of a pinned page when overriding `main.html`: the pin's
+`content_html` untouched, the frozen marking, and the link to its
+JSON twin. `blyg_validate.py` checks the first and last.
+
+To turn the pages off, set `pages = false` under `[params.blyg]`. Only
+do that on a site that has never served them with a pin: a pinned
+page, once served, MUST keep returning 200 (§8.4 rule 1). The module
+owns `/blyg/index.html`, so don't add `"html"` to the section's
+`outputs` as well.
 
 ## Not yet built
 
-Not built: pinned per-version JSON files served from
-`static/blyg/items/{id}/v{n}.json` (`scripts/blyg_stamp.py pin <id>`
-writes them; the templates don't read them back), generation provenance (§5.7, only
-needed once a version involves generation), and any live HTML permalink
-page for an item (§8.4).
+Not built: generation provenance (§5.7). It's only needed once a
+version involves generation, and it needs an authoring convention first:
+`content_md` must carry no markers at all, while `content_html` must
+wrap each generated span as `blyg-tk-gen`.
 
 ## Developing hugo-blyg
 
@@ -500,6 +555,7 @@ python3 ../scripts/blyg_stamp.py --check
 hugo --minify
 python3 ../scripts/blyg_validate.py
 ../tests/transclusion_e2e.sh                   # §10.4, on a scratch copy
+../tests/pages_e2e.sh                          # §8.4, likewise
 ```
 
 `exampleSite/go.mod` replaces the module with this checkout, so it always
@@ -508,6 +564,10 @@ an unstamped body edit fails `hugo`. `transclusion_e2e.sh` edits and then
 withdraws the fragment that `exampleSite`'s transcluding thread quotes,
 rebuilding each time, and fails unless the thread's built `content_html`
 stays byte-identical until the thread is itself re-stamped.
+`pages_e2e.sh` edits, re-kinds and withdraws `exampleSite`'s fragment,
+whose v1 is pinned, and fails unless the pinned page's content stays the
+pin's `content_html` throughout, the live page moves with the kind, and
+deleting the pin file fails the build.
 
 To try a change against a real site before tagging it, point that site's
 `go.mod` at a local checkout — the same `go list` recipe under "Scripts"

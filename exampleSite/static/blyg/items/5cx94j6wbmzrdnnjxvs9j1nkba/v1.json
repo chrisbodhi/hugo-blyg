@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T12:00:00Z",
+  "blyg": "0.2",
+  "content_hash": "sha256:b0a0c5985b2eff15e6bd84a53c9b2685971f13c79d215c13d92893f75ca6118a",
+  "content_html": "<p>A fragment with a <a href=\"https://example.org/about/\">root-relative link</a> and an image from the\norigin&rsquo;s media directory, both of which <code>content_html</code> has to carry as\nabsolute URLs:</p>\n<p><img src=\"https://example.org/blyg/media/dot.svg\" alt=\"A single dot\"></p>\n",
+  "content_md": "A fragment with a [root-relative link](/about/) and an image from the\norigin's media directory, both of which `content_html` has to carry as\nabsolute URLs:\n\n![A single dot](/blyg/media/dot.svg)\n",
+  "id": "5cx94j6wbmzrdnnjxvs9j1nkba",
+  "kind": "fragment",
+  "note": null,
+  "origin": "https://example.org/blyg/",
+  "pinned": true,
+  "version": 1
+}

@@ -1,0 +1,37 @@
+{{- /*
+  Reads back every pinned version of one item (§8) -- the files
+  `scripts/blyg_stamp.py pin <id>` writes to the site's own
+  static/blyg/items/{id}/v{n}.json, which Hugo then serves as-is -- and
+  returns them in version order, each as the pin document plus a
+  "path" (the site-relative JSON path):
+
+    {{ $pins := partial "blyg/pins.html" (dict "id" $id "ledger" $entry) }}
+
+  A pin is irrevocable: once the ledger records one, its file MUST keep
+  returning 200 forever (§8 rule 1). So a recorded pin whose file is
+  missing, or whose file names another id or version, fails the build
+  here rather than shipping a 404 or a wrong citation. The path is
+  relative to the site root, where blyg_stamp.py writes it by default
+  (its --static-dir).
+*/ -}}
+{{- $id := .id -}}
+{{- $pins := slice -}}
+{{- range .ledger.changelog -}}
+  {{- if .pinned -}}
+    {{- $n := int .version -}}
+    {{- $path := printf "static/blyg/items/%s/v%d.json" $id $n -}}
+    {{- if not (os.FileExists $path) -}}
+      {{- errorf "blyg: the ledger records a pin of %s v%d, but %s is missing -- a pinned version MUST return 200 forever (§8); restore it from git" $id $n $path -}}
+    {{- else -}}
+      {{- $doc := os.ReadFile $path | transform.Unmarshal -}}
+      {{- if or (ne $doc.id $id) (ne (int $doc.version) $n) (ne $doc.pinned true) -}}
+        {{- errorf "blyg: %s says id %v, version %v, pinned %v -- it must be the pin of %s v%d (§8)" $path $doc.id $doc.version $doc.pinned $id $n -}}
+      {{- end -}}
+      {{- if not (in (slice "fragment" "thread") $doc.kind) -}}
+        {{- errorf "blyg: %s has kind %q -- only a published fragment or thread version can be pinned; withdrawal endcaps MUST NOT be (§8 rule 2)" $path $doc.kind -}}
+      {{- end -}}
+      {{- $pins = $pins | append (merge $doc (dict "path" (strings.TrimPrefix "static/" $path))) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- return $pins -}}

@@ -453,6 +453,150 @@ def check_pins(public_blyg: Path, ledger: dict, origin: str, problems: Problems)
                              "ledger records a pin but the file isn't served -- MUST return 200 forever (§8)")
 
 
+def permalink(origin: str, blyg_id: str, kind: str) -> str:
+    """An item's live HTML page (§8.4): f/{id}/ for a fragment, t/{id}/
+    for a thread, keyed on the authored kind (which withdrawal keeps)."""
+    return f"{origin}{'f' if kind == 'fragment' else 't'}/{blyg_id}/"
+
+
+class _PageCollector(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rels: dict[str, list[str]] = {}  # <link rel> -> hrefs
+        self.hrefs: list[str] = []            # every href on the page
+        self.refresh: str | None = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "link":
+            for rel in (a.get("rel") or "").split():
+                self.rels.setdefault(rel, []).append(a.get("href") or "")
+        if a.get("href"):
+            self.hrefs.append(a["href"])
+        if tag == "meta" and (a.get("http-equiv") or "").lower() == "refresh":
+            self.refresh = (a.get("content") or "").partition("url=")[2] or None
+
+
+def _page(path: Path) -> tuple[str, _PageCollector]:
+    text = path.read_text(encoding="utf-8")
+    collector = _PageCollector()
+    collector.feed(text)
+    collector.close()
+    return text, collector
+
+
+def pages_built(public_blyg: Path) -> bool:
+    """Whether this build wrote the HTML pages ([params.blyg] pages). Told
+    by what only the module writes -- the item-page directories, or feed
+    entries linking item pages -- never by blyg/index.html, which a site
+    with pages off may well serve itself."""
+    if any((public_blyg / p).is_dir() for p in ("f", "t")):
+        return True
+    try:
+        root = ET.parse(public_blyg / "feed.xml").getroot()
+    except (OSError, ET.ParseError):
+        return False  # check_feed reports it
+    return any(item.find("link") is not None for item in root.iter("item"))
+
+
+def check_pages(public_blyg: Path, ledger: dict, docs: dict, origin: str,
+                problems: Problems) -> None:
+    """§8.4 and §4's human-readable HTML, when the build wrote it: every
+    item has its live permalink page; a pinned page exists exactly for
+    each pin (404 otherwise), carrying the pin's content_html verbatim,
+    marked with rel="canonical" to the live page and linking its JSON
+    twin; and no page anywhere links a version the origin doesn't
+    promise forever -- the live one and pins (§8.4)."""
+    if not pages_built(public_blyg):
+        return
+    if not (public_blyg / "index.html").is_file():
+        problems.add("index.html", "item pages are built, but the feed page isn't")
+    pinned = {(i, c["version"]) for i, e in ledger.items()
+              for c in e["changelog"] if c.get("pinned")}
+    pages: list[Path] = [public_blyg / "index.html"]
+
+    for blyg_id, entry in sorted(ledger.items()):
+        live = permalink(origin, blyg_id, entry["kind"])
+        where = live[len(origin):] + "index.html"
+        path = public_blyg / where
+        if not path.is_file():
+            problems.add(where, f"missing -- {blyg_id}'s live page")
+            continue
+        text, page = _page(path)
+        if page.rels.get("canonical") != [live]:
+            problems.add(where, f"rel=canonical is {page.rels.get('canonical')}, not {live}")
+        if page.rels.get("blyg") != [origin]:
+            problems.add(where, f"<link rel=\"blyg\"> MUST name the origin {origin} (§12.1)")
+        doc = docs.get(blyg_id) or {}
+        if doc.get("kind") not in (None, "withdrawn") and doc.get("content_html", "") not in text:
+            problems.add(where, "doesn't carry the item's live content_html")
+
+        for n in sorted(v for i, v in pinned if i == blyg_id):
+            pin_json = public_blyg / "items" / blyg_id / f"v{n}.json"
+            try:
+                pin = json.loads(pin_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue  # check_pins reports it
+            pw = permalink(origin, blyg_id, pin.get("kind"))[len(origin):] + f"v{n}/index.html"
+            if not (public_blyg / pw).is_file():
+                problems.add(pw, f"missing -- {blyg_id} v{n} is pinned, and a pinned page "
+                                 f"MUST return 200 forever once served (§8.4 rule 1)")
+                continue
+            ptext, ppage = _page(public_blyg / pw)
+            if pin.get("content_html", "") not in ptext:
+                problems.add(pw, "MUST carry the pinned version's publish-time content_html "
+                                 "verbatim (§8.4 rule 2)")
+            if ppage.rels.get("canonical") != [live]:
+                problems.add(pw, f"rel=canonical SHOULD point at the live page {live} (§8.4 rule 3)")
+            if f"{origin}items/{blyg_id}/v{n}.json" not in ppage.hrefs:
+                problems.add(pw, f"SHOULD link its v{n}.json twin (§8.4 rule 3)")
+
+    for kind_dir in ("f", "t"):
+        d = public_blyg / kind_dir
+        if not d.is_dir():
+            continue
+        for item_dir in sorted(d.iterdir()):
+            blyg_id = item_dir.name
+            entry = ledger.get(blyg_id)
+            if entry is None:
+                problems.add(f"{kind_dir}/{blyg_id}/", "served, but not in the ledger")
+                continue
+            live = permalink(origin, blyg_id, entry["kind"])
+            kind = "fragment" if kind_dir == "f" else "thread"
+            for child in sorted(item_dir.iterdir()):
+                where = f"{kind_dir}/{blyg_id}/{child.name}"
+                m = re.fullmatch(r"v([1-9][0-9]*)", child.name)
+                if child.name == "index.html":
+                    pages.append(child)
+                    if kind == entry["kind"]:
+                        continue  # the live page, checked above
+                    _, page = _page(child)
+                    had = any(c.get("kind") == kind for c in entry["changelog"])
+                    if not had or page.refresh != live:
+                        problems.add(where, f"only the live page {live}, or a redirect to it "
+                                            f"from a kind the item once had, belongs here")
+                elif m and child.is_dir():
+                    pages.append(child / "index.html")
+                    if (blyg_id, int(m.group(1))) not in pinned:
+                        problems.add(where + "/", f"served, but v{m.group(1)} isn't pinned -- a "
+                                                  f"pinned page MUST 404 unless it is (§8.4 rule 1)")
+                else:
+                    problems.add(where, "unexpected")
+
+    version_link = re.compile(re.escape(origin) + r"(?:[ft]/|items/)(" + bs.BLYG_ID_RE_SRC
+                              + r")/v([1-9][0-9]*)(?:/|\.json)")
+    for path in pages:
+        if not path.is_file():
+            continue
+        _, page = _page(path)
+        for href in page.hrefs:
+            m = version_link.match(href)
+            if m and (m.group(1), int(m.group(2))) not in pinned:
+                problems.add(str(path.relative_to(public_blyg)),
+                             f"links {href}, an unpinned version -- a version display MUST "
+                             f"NOT offer access to unpinned history (§8.4)")
+
+
 def check_feed(public_blyg: Path, ledger: dict, docs: dict, manifest: dict,
                origin: str, problems: Problems) -> None:
     where = "feed.xml"
@@ -474,6 +618,7 @@ def check_feed(public_blyg: Path, ledger: dict, docs: dict, manifest: dict,
         if channel.find(name) is None:
             problems.add(where, f"channel lacks <{name}> (RSS 2.0)")
 
+    with_pages = pages_built(public_blyg)
     entries = channel.findall("item")
     if len(entries) > FEED_WINDOW:
         problems.add(where, f"{len(entries)} entries; window is {FEED_WINDOW} (§7)")
@@ -504,6 +649,11 @@ def check_feed(public_blyg: Path, ledger: dict, docs: dict, manifest: dict,
             problems.add(w, "blyg:created != item document's created")
         if item.findtext(q("item")) != f"{origin}items/{blyg_id}.json":
             problems.add(w, "blyg:item doesn't point at the item document")
+        link = item.findtext("link")
+        if with_pages and link != permalink(origin, blyg_id, entry["kind"]):
+            problems.add(w, f"<link> {link!r} isn't the item's live page")
+        elif not with_pages and link is not None:
+            problems.add(w, f"<link> {link!r}, but no item pages were built")
         description = item.findtext("description") or ""
         # --minify trims the text node's edge whitespace; the HTML is the same.
         if description.strip() != doc.get("content_html", "").strip():
@@ -563,6 +713,7 @@ def validate(public_dir: Path, ledger_path: Path) -> Problems:
     check_snapshots(public_blyg, ledger, docs, problems)
     check_index(public_blyg, ledger, docs, problems)
     check_pins(public_blyg, ledger, origin, problems)
+    check_pages(public_blyg, ledger, docs, origin, problems)
     check_feed(public_blyg, ledger, docs, manifest, origin, problems)
     return problems
 

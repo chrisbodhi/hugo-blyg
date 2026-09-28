@@ -15,7 +15,8 @@ Usage:
     blyg_stamp.py --dry-run       print planned changes, write nothing
     blyg_stamp.py --check         exit nonzero if stamping would change anything
     blyg_stamp.py pin <id>        promote the built items/{id}.json to a
-                                   permanent pinned static file (§8)
+                                   permanent pinned static file (§8); the
+                                   next build publishes its page (§8.4)
 """
 
 from __future__ import annotations
@@ -912,6 +913,8 @@ def cmd_pin(args: argparse.Namespace) -> int:
 
     changelog_entry["pinned"] = True
     save_ledger(ledger_path, ledger)
+    print("rebuild to publish it; commit both files -- the build fails on a "
+          "recorded pin whose file is missing")
     return 0
 
 

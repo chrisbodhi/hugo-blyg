@@ -41,6 +41,9 @@
 {{- $base := site.BaseURL -}}
 {{- $ledger := site.Data.blyg.ledger -}}
 {{- $manifestURL := printf "%sblyg/blyg.json" $base -}}
+{{- /* Each entry links its item's live HTML page (§7's example), when this
+       module writes those (partials/blyg/pages.html). */ -}}
+{{- $pages := partial "blyg/pages-enabled.html" . -}}
 
 {{- $events := slice -}}
 {{- range .Pages -}}
@@ -58,6 +61,7 @@
             "sort" (printf "%s|%010d" $last.at (int $last.version))
             "kind" "withdrawn" "title" "withdrawn" "description" ""
             "created" $doc.created
+            "link" (partial "blyg/permalink.html" (dict "id" $id "kind" $entry.kind "base" $base))
         ) -}}
       {{- else -}}
         {{- range $entry.changelog -}}
@@ -67,6 +71,7 @@
               "kind" (.kind | default $doc.kind) "title" (.note | default "")
               "description" $doc.content_html
               "created" $doc.created
+              "link" (partial "blyg/permalink.html" (dict "id" $id "kind" $entry.kind "base" $base))
           ) -}}
         {{- end -}}
       {{- end -}}
@@ -94,6 +99,9 @@
     {{- range $events }}
     <item>
       <guid isPermaLink="false">blyg:{{ .id }}:v{{ .version }}</guid>
+      {{- if $pages }}
+      <link>{{ .link }}</link>
+      {{- end }}
       {{- with .title }}
       <title>{{ . }}</title>
       {{- end }}

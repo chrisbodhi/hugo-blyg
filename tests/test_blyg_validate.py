@@ -95,6 +95,7 @@ class SurfaceTests(unittest.TestCase):
                                            "note": None, "kind": "thread"}]}}
         self.feed_items = None
         self.manifest_extra = {}
+        self.pages = None  # {site-relative path: html} to write as built pages
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -124,6 +125,9 @@ class SurfaceTests(unittest.TestCase):
             f'<link>{ORIGIN}</link><description>d</description>'
             f'<blyg:manifest>{ORIGIN}blyg.json</blyg:manifest>{"".join(items)}'
             '</channel></rss>', encoding="utf-8")
+        for rel, text in (self.pages or {}).items():
+            (self.blyg / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.blyg / rel).write_text(text, encoding="utf-8")
 
     def feed_item(self, blyg_id, version, doc, *, title=None, description=None, kind=None):
         at = self.ledger[blyg_id]["changelog"][version - 1]["at"]
@@ -131,7 +135,10 @@ class SurfaceTests(unittest.TestCase):
             "%a, %d %b %Y %H:%M:%S GMT")
         kind = kind or self.ledger[blyg_id]["changelog"][version - 1]["kind"]
         desc = doc["content_html"] if description is None else description
-        return (f'<item><guid isPermaLink="false">blyg:{blyg_id}:v{version}</guid>'
+        link = ""
+        if self.pages is not None:
+            link = f"<link>{bv.permalink(ORIGIN, blyg_id, self.ledger[blyg_id]['kind'])}</link>"
+        return (f'<item><guid isPermaLink="false">blyg:{blyg_id}:v{version}</guid>{link}'
                 + (f"<title>{escape(title)}</title>" if title else "")
                 + f"<description>{escape(desc)}</description><pubDate>{pub}</pubDate>"
                 f"<blyg:id>{blyg_id}</blyg:id><blyg:kind>{kind}</blyg:kind>"
@@ -241,6 +248,100 @@ class SurfaceTests(unittest.TestCase):
     def test_blogroll_relative_url_fails(self):
         self.blogroll(self.OUTLINE.replace('"https://a.example/feed.xml"', '"/feed.xml"'))
         self.assertTrue(any("xmlUrl" in p for p in self.problems()))
+
+
+def page(canonical, body="", links=()):
+    return (f'<!doctype html><html><head><link rel="canonical" href="{canonical}">'
+            f'<link rel="blyg" href="{ORIGIN}"></head><body>{body}'
+            + "".join(f'<a href="{h}">x</a>' for h in links) + "</body></html>")
+
+
+class PageTests(SurfaceTests):
+    """The HTML pages partials/blyg/pages.html writes (§4, §8.4)."""
+
+    LIVE = f"{ORIGIN}t/{ID}/"
+
+    def setUp(self):
+        super().setUp()
+        self.pages = {"index.html": page(ORIGIN),
+                      f"t/{ID}/index.html": page(self.LIVE, "<p>Body.</p>")}
+
+    def pin_v1(self):
+        self.ledger[ID]["changelog"][0]["pinned"] = True
+        self.docs[ID]["changelog"][0]["pinned"] = True
+        pin = {"blyg": "0.2", "id": ID, "kind": "thread", "version": 1,
+               "at": "2026-01-01T00:00:00Z", "note": None, "pinned": True, "origin": ORIGIN,
+               "content_md": "Body.\n", "content_html": "<p>Body.</p>",
+               "content_hash": bs.content_hash("Body.\n"), "transclusions": []}
+        (self.blyg / "items" / ID).mkdir()
+        (self.blyg / "items" / ID / "v1.json").write_text(json.dumps(pin), encoding="utf-8")
+        self.pages[f"t/{ID}/v1/index.html"] = page(
+            self.LIVE, "<p>Body.</p>", [f"{ORIGIN}items/{ID}/v1.json"])
+        self.pages[f"t/{ID}/index.html"] = page(self.LIVE, "<p>Body.</p>", [f"{self.LIVE}v1/"])
+
+    def test_pinned_page_passes(self):
+        self.pin_v1()
+        self.assertEqual(self.problems(), [])
+
+    def test_missing_live_page_fails(self):
+        del self.pages[f"t/{ID}/index.html"]
+        self.assertTrue(any("live page" in p for p in self.problems()))
+
+    def test_live_page_must_carry_the_live_content(self):
+        self.pages[f"t/{ID}/index.html"] = page(self.LIVE, "<p>Old.</p>")
+        self.assertTrue(any("live content_html" in p for p in self.problems()))
+
+    def test_feed_links_the_live_page(self):
+        self.pages = None  # a feed without <link>s, next to built pages
+        self.write()
+        (self.blyg / "index.html").write_text(page(ORIGIN), encoding="utf-8")
+        (self.blyg / "t" / ID).mkdir(parents=True)
+        (self.blyg / "t" / ID / "index.html").write_text(page(self.LIVE, "<p>Body.</p>"),
+                                                         encoding="utf-8")
+        problems = bv.validate(self.public, self.ledger_path)
+        self.assertTrue(any("<link>" in p for p in problems), problems)
+
+    def test_a_sites_own_feed_page_is_not_item_pages(self):
+        self.pages = None
+        self.write()
+        (self.blyg / "index.html").write_text(page(ORIGIN), encoding="utf-8")
+        self.assertEqual(bv.validate(self.public, self.ledger_path), [])
+
+    def test_unpinned_version_page_fails(self):
+        self.pages[f"t/{ID}/v1/index.html"] = page(self.LIVE, "<p>Body.</p>")
+        self.assertTrue(any("isn't pinned" in p for p in self.problems()))
+
+    def test_missing_pinned_page_fails(self):
+        self.pin_v1()
+        del self.pages[f"t/{ID}/v1/index.html"]
+        self.assertTrue(any("pinned page" in p for p in self.problems()))
+
+    def test_pinned_page_must_be_verbatim(self):
+        self.pin_v1()
+        self.pages[f"t/{ID}/v1/index.html"] = page(
+            self.LIVE, "<p>Body. </p>", [f"{ORIGIN}items/{ID}/v1.json"])
+        self.assertTrue(any("verbatim" in p for p in self.problems()))
+
+    def test_pinned_page_is_canonical_to_the_live_page(self):
+        self.pin_v1()
+        self.pages[f"t/{ID}/v1/index.html"] = page(
+            f"{self.LIVE}v1/", "<p>Body.</p>", [f"{ORIGIN}items/{ID}/v1.json"])
+        self.assertTrue(any("rel=canonical" in p for p in self.problems()))
+
+    def test_linking_an_unpinned_version_fails(self):
+        self.pages["index.html"] = page(ORIGIN, links=[f"{ORIGIN}items/{ID}/v1.json"])
+        self.assertTrue(any("unpinned history" in p for p in self.problems()))
+
+    def test_redirect_only_from_a_kind_the_item_had(self):
+        self.pages[f"f/{ID}/index.html"] = (
+            f'<meta http-equiv="refresh" content="0; url={self.LIVE}">')
+        self.assertTrue(any("redirect" in p for p in self.problems()))
+        self.ledger[ID]["changelog"][0]["kind"] = "fragment"
+        self.ledger[ID]["version"] = 2
+        self.ledger[ID]["changelog"].append(
+            {"version": 2, "at": "2026-01-02T00:00:00Z", "note": None, "kind": "thread"})
+        self.docs[ID] = item_doc(ID, version=2)
+        self.assertEqual(self.problems(), [])
 
 
 FRAG = "5cx94j6wbmzrdnnjxvs9j1nkba"

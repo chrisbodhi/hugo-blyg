@@ -64,6 +64,10 @@ but not load-bearing today.
       site automatically; a site's own copy still overrides it). Off
       Apache, the site must add the equivalent itself — see the README's
       "Setup" for Netlify/Cloudflare Pages, nginx, and S3/CloudFront.
+- [ ] (SHOULD) Human-readable HTML — a feed page and item permalink
+      pages — written by `partials/blyg/pages.html` at `index.html`,
+      `f/{id}/` and `t/{id}/` (on unless `[params.blyg] pages = false`).
+      Presentation, not protocol, except where §8.4 says otherwise (below).
 
 ## §5 — The item document (`items/{id}.json`)
 
@@ -218,17 +222,38 @@ but not load-bearing today.
       alone.
 - [ ] No route may ever serve an unpinned older version, in any
       representation — a version display MUST NOT offer, imply, or hint
-      at access to unpinned history.
+      at access to unpinned history. An item page's version line is the
+      live version plus pin citations ("v6 · pinned: v2, v4"), nothing
+      else; `blyg_validate.py` fails any built page that links a
+      `v{n}/` page or `v{n}.json` file for an unpinned version.
 - [ ] `blyg_stamp.py pin <id>` refuses to pin unless the built
       `public/blyg/items/{id}.json` version matches the ledger version.
       Verified end to end: pinning v1, then bumping to v2, then
       withdrawing to v3 — the pinned v1 file is untouched by either
       later change, both in the ledger and in a rebuilt `public/`.
-- [ ] (If pinned pages are ever served) gated exactly like the JSON file;
-      content is that version's publish-time `content_html`, verbatim;
-      pinned pages MUST NOT appear in `feed.xml`, `items/index.json`, or
-      add manifest vocabulary. *(Not built this phase — no live
-      permalink pages yet; JSON/XML surfaces only.)*
+- [ ] The templates read every pin back (`partials/blyg/pins.html`): a
+      pin the ledger records whose `static/blyg/items/{id}/v{n}.json` is
+      missing, names another id or version, or isn't a fragment/thread
+      fails the build — the backstop to `blyg_validate.py`'s check of
+      the built pins.
+- [ ] Pinned pages (§8.4, MAY; served with the item pages) at
+      `f/{id}/v{n}/` or `t/{id}/v{n}/` by the kind that version had:
+      - gated exactly like the JSON file — written only for the ledger's
+        pins, so 404 otherwise, and 200 for as long as the pin file is
+        there, which the build enforces (rule 1). `blyg_validate.py`
+        checks both directions. A site that turns pages off after serving
+        a pinned one breaks this; the README says so.
+      - content is that version's publish-time `content_html`, verbatim,
+        taken from the pin file rather than re-rendered, and not touched
+        by `hugo --minify` (resources.FromString output isn't minified,
+        checked against Hugo 0.151.0). `blyg_validate.py` checks the page
+        carries the pin's `content_html` byte for byte (rule 2).
+      - `rel="canonical"` to the live permalink, a visible frozen-snapshot
+        banner, and a link to the `v{n}.json` twin (rule 3, SHOULD).
+      - not publish events: they appear in neither `feed.xml` nor
+        `items/index.json`, and add no manifest vocabulary (rule 4).
+      *(`tests/pages_e2e.sh` proves the content survives an edit, a kind
+      change and a withdrawal against real builds in CI.)*
 
 ## §9 — Withdrawal
 
@@ -330,6 +355,11 @@ called from the manifest template; `blyg_validate.py` checks the built file.)*
 - [ ] The blogroll never changes the conformance level (§3).
 
 ## §12 — Resolution (publisher-facing SHOULD)
+
+- [ ] Every page `partials/blyg/pages.html` writes carries `<link
+      rel="blyg">` naming the origin, and the feed's `rel="alternate"`
+      (step 6's autodiscovery). Each `feed.xml` entry's `<link>` is its
+      item's live page, as in §7's example.
 
 - [ ] The blyg mounts at `/blyg/`, away from the pages people share, so
       every page's `<head>` carries `<link rel="blyg"
