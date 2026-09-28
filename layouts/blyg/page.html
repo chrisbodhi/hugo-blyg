@@ -1,0 +1,31 @@
+{{- /*
+  The live permalink and pinned-version pages the module's content adapter
+  (content/blyg/_content.gotmpl) adds. Only "main" is defined here, so the
+  site's own baseof.html supplies the page around it -- the head, the
+  header and navigation, the styles -- like any other page on the site.
+  The content itself is partials/blyg/html/main.html.
+
+  (The items' own Markdown pages share this section but never render: the
+  section's cascade sets them to render = "never".)
+*/ -}}
+{{- define "main" -}}
+{{- $id := .Params.blyg_id -}}
+{{- $entry := index site.Data.blyg.ledger $id -}}
+{{- $base := site.BaseURL -}}
+{{- $origin := printf "%s/blyg/" (strings.TrimSuffix "/" $base) -}}
+{{- $live := partial "blyg/permalink.html" (dict "id" $id "kind" $entry.kind "base" $base) -}}
+{{- $pins := slice -}}
+{{- range partial "blyg/pins.html" (dict "id" $id "ledger" $entry) -}}
+  {{- $page := printf "%sv%d/" (partial "blyg/permalink.html" (dict "id" $id "kind" .kind "base" $base)) (int .version) -}}
+  {{- $pins = $pins | append (merge . (dict "page" $page "json" (printf "%s%s" $origin (strings.TrimPrefix "blyg/" .path)))) -}}
+{{- end -}}
+
+{{- if eq .Params.blyg_page "pin" -}}
+  {{- $pin := index (where $pins "version" .Params.blyg_version) 0 -}}
+  {{ partial "blyg/html/main.html" (dict "page" "pin" "pin" $pin "live" $live) }}
+{{- else -}}
+  {{- $source := index (where site.RegularPages "Params.blyg_id" $id) 0 -}}
+  {{- $doc := partialCached "blyg/item.html" (dict "page" $source "ledger" $entry "base" $base) $id -}}
+  {{ partial "blyg/html/main.html" (dict "page" "item" "doc" $doc "pins" $pins "json" (printf "%sitems/%s.json" $origin $id)) }}
+{{- end -}}
+{{- end -}}

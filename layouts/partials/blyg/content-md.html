@@ -1,0 +1,20 @@
+{{- /*
+  content_md from a source body (§5.7): the body with its blyg-gen
+  markers stripped -- a line that is nothing but one marker (a block
+  span's) goes entirely, and a marker inside a line (an inline span's)
+  goes on its own. The same rule, line for line and with the same
+  regular expressions, as strip_gen_markers in scripts/blyg_stamp.py,
+  whose hash the build checks this against.
+
+    {{ $contentMD := partial "blyg/content-md.html" $page.RawContent }}
+*/ -}}
+{{- $open := `\{\{<[ \t]*blyg-gen((?:[ \t]+[a-z]+="[^"]*")*)[ \t]*>\}\}` -}}
+{{- $close := `\{\{<[ \t]*/blyg-gen[ \t]*>\}\}` -}}
+{{- $out := slice -}}
+{{- range split . "\n" -}}
+  {{- $alone := trim . " \t" -}}
+  {{- if not (findRE (printf `^(?:%s|%s)$` $open $close) $alone 1) -}}
+    {{- $out = $out | append (replaceRE $close "" (replaceRE $open "" .)) -}}
+  {{- end -}}
+{{- end -}}
+{{- return delimit $out "\n" -}}

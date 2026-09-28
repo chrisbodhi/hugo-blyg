@@ -30,9 +30,10 @@ Scope: this module publishes at Level 1 only, as a single-author,
 non-multiplayer origin. Every item authors its `kind` via
 `blyg_kind` in front matter (`"fragment"` or `"thread"`; defaults to
 `"thread"`), and threads resolve `![[id]]` directives against the
-site's own fragments at publish time (§10). The blogroll (§11) and
-generation provenance (§5.7) are not exercised yet, so their rules are
-listed for completeness but not all are load-bearing today.
+site's own fragments at publish time (§10). A site that writes
+`data/blyg/blogroll.json` serves a blogroll (§11). Generated spans are
+marked with the module's `blyg-gen` shortcode and disclosed as
+`generated` (§5.7).
 
 ## §4 — The publication surface
 
@@ -63,6 +64,13 @@ listed for completeness but not all are load-bearing today.
       site automatically; a site's own copy still overrides it). Off
       Apache, the site must add the equivalent itself — see the README's
       "Setup" for Netlify/Cloudflare Pages, nginx, and S3/CloudFront.
+- [ ] (SHOULD) Human-readable HTML — a feed page and item permalink
+      pages — as ordinary pages of the site, rendered inside its own
+      `baseof.html`: the feed page is the section's `"html"` output
+      (`layouts/blyg/section.html`), and the item and pinned pages come
+      from the module's content adapter (`content/blyg/_content.gotmpl`),
+      built but never listed (on unless `[params.blyg] pages = false`).
+      Presentation, not protocol, except where §8.4 says otherwise (below).
 
 ## §5 — The item document (`items/{id}.json`)
 
@@ -75,7 +83,8 @@ listed for completeness but not all are load-bearing today.
       **only** — never `author`, media bytes, or `content_html`.
       *(Verified empirically: Hugo 0.151's `.RawContent` reproduces the
       file's post-front-matter bytes exactly, including leading/trailing
-      newlines and a missing final newline — safe to hash directly.)*
+      newlines and a missing final newline — safe to hash, once any
+      `blyg-gen` markers are stripped (§5.7 below).)*
 - [ ] `version` MUST be a positive integer, incremented by exactly 1 per
       publish event. Draft saves are invisible to the protocol. By default
       every stamp run that changes something bumps, which can only
@@ -115,20 +124,49 @@ listed for completeness but not all are load-bearing today.
       clients that store/re-emit item JSON MUST carry it verbatim, never
       synthesized or rewritten.
 - [ ] `"forked_from"` MUST NOT be emitted at 0.2 (reserved for L2/0.3).
-- [ ] The `generated` array, if used: MUST NOT carry instruction text or
-      other pre-generation authoring state; is omitted entirely when a
-      version involved no generation; a withdrawal endcap MUST NOT carry
-      it. (Not built yet — no generation-provenance workflow in scope.)
-- [ ] If `generated` is used, the renderer MUST wrap each generated span
-      in `content_html` as `<span class="blyg-tk-gen">…</span>` (inline)
-      or `<div class="blyg-tk-gen">…</div>` (block) — a permanent wire
-      token, never renamed.
+- [ ] `content_md` carries no authoring markup: generated spans are
+      marked in the source with `{{< blyg-gen >}}…{{< /blyg-gen >}}`,
+      whose markers `blyg_stamp.py` (`strip_gen_markers`) and the build
+      (`partials/blyg/content-md.html`) strip by the same line-for-line
+      rule before hashing. A block span must stand between blank lines,
+      so its stripped text stays its own paragraphs. `blyg_validate.py`
+      fails any `content_md` still carrying a marker.
+- [ ] The `generated` array: one entry per span, in document order, of
+      `sources` (`{id, version}` — exact published versions of this
+      origin's items, possibly none), `model` and `at` (§5.7 rule 1).
+      Sources are pinned at publish time and stored in the ledger, so a
+      source's later edits never reach an unchanged version; a bare id
+      resolves to the source's latest version published before the stamp
+      run.
+- [ ] MUST NOT carry instruction text or other pre-generation authoring
+      state (rule 2): `blyg-gen` takes only `sources`, `model`, `at`, and
+      the validator refuses any other member.
+- [ ] A source is not a transclusion (rule 3): a directive inside a
+      generated block is refused, and a thread quoting a fragment with
+      generated spans lists none of them in its own `generated` — the
+      validator counts only `blyg-tk-gen` wrappers outside transclusion
+      blockquotes against it.
+- [ ] Omitted entirely when a version involved no generation, never
+      emitted empty; a withdrawal endcap never carries it (rule 4).
+- [ ] Pinned version files carry the pinned version's `generated`
+      (rule 5; `build_pin_document`).
+- [ ] The provenance is part of the version: a changed `blyg-gen`
+      parameter is a new version even though `content_md` doesn't change,
+      and the build fails if the body's markers disagree with the ledger.
+- [ ] The renderer wraps each generated span in `content_html` as
+      `<span class="blyg-tk-gen">…</span>` (inline: both markers on one
+      line) or `<div class="blyg-tk-gen">…</div>` (block) — a permanent
+      wire token, never renamed. The module's `blyg-gen` shortcode does
+      this, and leaves the class unstyled. *(Verified against Hugo
+      0.151.0: a block span's `<div>` isn't wrapped in `<p>`, and
+      `.RenderString` — the transclusion path — renders it byte-identically
+      to `.Content`.)*
 
 ## §6 — Manifest and archive index
 
 - [ ] `blyg.json` carries `"blyg": "0.2"`, `level`, `generator`, `site`,
       `title`, `feed`, `items`, `updated`; `blogroll` key present only
-      when a non-empty blogroll is served (not the case here).
+      when a non-empty blogroll is served (§11 below).
       `level` comes from `[params.blyg].level` in `config.toml`
       (defaults to `1`); the build refuses any value other than `1`. L2's
       constructs (stub metadata, nesting, `forked_from`, webmention)
@@ -217,17 +255,41 @@ listed for completeness but not all are load-bearing today.
       alone.
 - [ ] No route may ever serve an unpinned older version, in any
       representation — a version display MUST NOT offer, imply, or hint
-      at access to unpinned history.
+      at access to unpinned history. An item page's version line is the
+      live version plus pin citations ("v6 · pinned: v2, v4"), nothing
+      else; `blyg_validate.py` fails any built page that links a
+      `v{n}/` page or `v{n}.json` file for an unpinned version.
 - [ ] `blyg_stamp.py pin <id>` refuses to pin unless the built
       `public/blyg/items/{id}.json` version matches the ledger version.
       Verified end to end: pinning v1, then bumping to v2, then
       withdrawing to v3 — the pinned v1 file is untouched by either
       later change, both in the ledger and in a rebuilt `public/`.
-- [ ] (If pinned pages are ever served) gated exactly like the JSON file;
-      content is that version's publish-time `content_html`, verbatim;
-      pinned pages MUST NOT appear in `feed.xml`, `items/index.json`, or
-      add manifest vocabulary. *(Not built this phase — no live
-      permalink pages yet; JSON/XML surfaces only.)*
+- [ ] The templates read every pin back (`partials/blyg/pins.html`): a
+      pin the ledger records whose `static/blyg/items/{id}/v{n}.json` is
+      missing, names another id or version, or isn't a fragment/thread
+      fails the build — the backstop to `blyg_validate.py`'s check of
+      the built pins.
+- [ ] Pinned pages (§8.4, MAY; served with the item pages) at
+      `f/{id}/v{n}/` or `t/{id}/v{n}/` by the kind that version had:
+      - gated exactly like the JSON file — added only for the ledger's
+        pins, so 404 otherwise, and 200 for as long as the pin file is
+        there, which the build enforces (rule 1). `blyg_validate.py`
+        checks both directions. A site that turns pages off after serving
+        a pinned one breaks this; the README says so.
+      - content is that version's publish-time `content_html`, taken from
+        the pin file rather than re-rendered (rule 2). Under `hugo
+        --minify` the page is minified like the rest of the site, which
+        respells the bytes but changes no element, attribute or word, so
+        `blyg_validate.py` (`carries`) compares markup rather than bytes;
+        the JSON twin stays the byte-exact citation.
+      - a visible frozen-snapshot banner and a link to the `v{n}.json`
+        twin (rule 3, SHOULD). `rel="canonical"` to the live permalink
+        is the site's head's to emit, from `.Params.blyg_canonical`; the
+        validator checks it where present.
+      - not publish events: they appear in neither `feed.xml` nor
+        `items/index.json`, and add no manifest vocabulary (rule 4).
+      *(`tests/pages_e2e.sh` proves the content survives an edit, a kind
+      change and a withdrawal against real builds in CI.)*
 
 ## §9 — Withdrawal
 
@@ -236,7 +298,8 @@ listed for completeness but not all are load-bearing today.
       `"kind": "withdrawn"`, `updated` set, changelog retained plus the
       endcap entry.
 - [ ] For threads, the endcap also empties `transclusions` to `[]`.
-- [ ] An endcap never carries a `generated` array.
+- [ ] An endcap never carries a `generated` array (the stamp script drops
+      it from the ledger; the validator refuses it on the wire).
 - [ ] The item document stays 200 forever; pinned versions remain
       fetchable forever.
 - [ ] Withdrawal is reversible: a later publish event (vN+1, with the
@@ -301,7 +364,39 @@ no-cascade rule against real builds in CI.)*
 - [ ] No auto-pin: `transclusions[].version` may name a version with no
       fetchable per-version file.
 
+## §11 — The blogroll (`blogroll.opml`, OPTIONAL)
+
+*(Built from `data/blyg/blogroll.json` by `layouts/partials/blyg/blogroll.html`,
+called from the manifest template; `blyg_validate.py` checks the built file.)*
+
+- [ ] Standard OPML 2.0 with no extensions, at the protocol-fixed
+      origin-relative `blogroll.opml`. The build refuses any data key
+      besides `text`/`xmlUrl`/`htmlUrl`; the validator refuses any outline
+      attribute OPML 2.0 doesn't define.
+- [ ] One `<outline type="rss">` per entry: `xmlUrl` the feed, `htmlUrl`
+      the origin (or a legacy feed's page), `text`/`title` the display
+      title. Both URLs must be absolute http(s): the file is read from
+      other origins.
+- [ ] No blyg-specific attributes: `<blyg:manifest>` in the listed feed
+      is the upgrade path (§7, §12 step 3).
+- [ ] The manifest's `blogroll` key is present exactly when a non-empty
+      blogroll is served; nothing to show means no file (404) and no key.
+      The validator checks both directions, so a stale `blogroll.opml`
+      left in `public/` by an earlier build is caught too.
+- [ ] Curated, never complete, opt-in per subscription: every entry is
+      one the publisher wrote into the data file; nothing is exported
+      from a subscription list.
+- [ ] (SHOULD) `<link rel="blogroll">` on the HTML feed page, emitted by
+      `partials/blyg/head.html` when a blogroll is served.
+- [ ] The blogroll never changes the conformance level (§3).
+
 ## §12 — Resolution (publisher-facing SHOULD)
+
+- [ ] The blyg pages render in the site's own `baseof.html`, whose
+      `<link rel="blyg">` (setup step 4) `blyg_validate.py` checks on each
+      item page; `partials/blyg/head.html` adds the feed's
+      `rel="alternate"` (step 6's autodiscovery) there. Each `feed.xml`
+      entry's `<link>` is its item's live page, as in §7's example.
 
 - [ ] The blyg mounts at `/blyg/`, away from the pages people share, so
       every page's `<head>` carries `<link rel="blyg"

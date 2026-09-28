@@ -1,13 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>{{ site.Title }}</title>
-  {{- /* §12.1 step 4: every page points readers at the blyg origin, so
-         resolving a page doesn't depend on probing /blyg/. */}}
-  <link rel="blyg" href="{{ "blyg/" | absURL }}">
-</head>
-<body>
-  <p><a href="{{ "blyg/feed.xml" | absURL }}">Blyg feed</a></p>
-</body>
-</html>
+{{ define "main" }}
+<p><a href="{{ "blyg/" | absURL }}">Blyg</a> · <a href="{{ "blyg/feed.xml" | absURL }}">feed</a></p>
+{{ end }}

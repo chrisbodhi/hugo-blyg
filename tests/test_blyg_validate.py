@@ -94,6 +94,8 @@ class SurfaceTests(unittest.TestCase):
                             "changelog": [{"version": 1, "at": "2026-01-01T00:00:00Z",
                                            "note": None, "kind": "thread"}]}}
         self.feed_items = None
+        self.manifest_extra = {}
+        self.pages = None  # {site-relative path: html} to write as built pages
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -103,7 +105,8 @@ class SurfaceTests(unittest.TestCase):
         updated = max(d["updated"] for d in self.docs.values())
         (self.blyg / "blyg.json").write_text(json.dumps({
             "blyg": "0.2", "level": 1, "generator": "t", "site": ORIGIN, "title": "t",
-            "feed": "feed.xml", "items": "items/index.json", "updated": updated}), encoding="utf-8")
+            "feed": "feed.xml", "items": "items/index.json", "updated": updated,
+            **self.manifest_extra}), encoding="utf-8")
         rows = sorted(({k: d[k] for k in ("id", "kind", "created", "updated", "version")}
                        for d in self.docs.values()), key=lambda r: r["updated"], reverse=True)
         (self.blyg / "items" / "index.json").write_text(
@@ -122,6 +125,9 @@ class SurfaceTests(unittest.TestCase):
             f'<link>{ORIGIN}</link><description>d</description>'
             f'<blyg:manifest>{ORIGIN}blyg.json</blyg:manifest>{"".join(items)}'
             '</channel></rss>', encoding="utf-8")
+        for rel, text in (self.pages or {}).items():
+            (self.blyg / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.blyg / rel).write_text(text, encoding="utf-8")
 
     def feed_item(self, blyg_id, version, doc, *, title=None, description=None, kind=None):
         at = self.ledger[blyg_id]["changelog"][version - 1]["at"]
@@ -129,7 +135,10 @@ class SurfaceTests(unittest.TestCase):
             "%a, %d %b %Y %H:%M:%S GMT")
         kind = kind or self.ledger[blyg_id]["changelog"][version - 1]["kind"]
         desc = doc["content_html"] if description is None else description
-        return (f'<item><guid isPermaLink="false">blyg:{blyg_id}:v{version}</guid>'
+        link = ""
+        if self.pages is not None:
+            link = f"<link>{bv.permalink(ORIGIN, blyg_id, self.ledger[blyg_id]['kind'])}</link>"
+        return (f'<item><guid isPermaLink="false">blyg:{blyg_id}:v{version}</guid>{link}'
                 + (f"<title>{escape(title)}</title>" if title else "")
                 + f"<description>{escape(desc)}</description><pubDate>{pub}</pubDate>"
                 f"<blyg:id>{blyg_id}</blyg:id><blyg:kind>{kind}</blyg:kind>"
@@ -196,6 +205,205 @@ class SurfaceTests(unittest.TestCase):
         self.ledger[ID]["changelog"][0]["pinned"] = True
         self.docs[ID]["changelog"][0]["pinned"] = True
         self.assertTrue(any("pin" in p for p in self.problems()))
+
+    def test_manifest_author_without_a_name_fails(self):
+        self.manifest_extra = {"author": {"name": None}}
+        self.assertTrue(any("author.name" in p for p in self.problems()))
+
+    def blogroll(self, *outlines, key="blogroll.opml"):
+        self.manifest_extra = {"blogroll": key}
+        (self.blyg / "blogroll.opml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?><opml version="2.0">'
+            f'<head><title>t</title></head><body>{"".join(outlines)}</body></opml>',
+            encoding="utf-8")
+
+    OUTLINE = ('<outline type="rss" text="A" title="A" xmlUrl="https://a.example/feed.xml" '
+               'htmlUrl="https://a.example/"/>')
+
+    def test_blogroll_passes(self):
+        self.blogroll(self.OUTLINE)
+        self.assertEqual(self.problems(), [])
+
+    def test_blogroll_key_without_the_file_fails(self):
+        self.manifest_extra = {"blogroll": "blogroll.opml"}
+        self.assertTrue(any("isn't served" in p for p in self.problems()))
+
+    def test_blogroll_file_without_the_key_fails(self):
+        self.blogroll(self.OUTLINE)
+        self.manifest_extra = {}
+        self.assertTrue(any("no blogroll key" in p for p in self.problems()))
+
+    def test_blogroll_filename_is_fixed(self):
+        self.blogroll(self.OUTLINE, key="roll.opml")
+        self.assertTrue(any("protocol-fixed" in p for p in self.problems()))
+
+    def test_empty_blogroll_fails(self):
+        self.blogroll()
+        self.assertTrue(any("nothing to show" in p for p in self.problems()))
+
+    def test_blogroll_extension_attribute_fails(self):
+        self.blogroll(self.OUTLINE.replace("/>", ' blygOrigin="https://a.example/"/>'))
+        self.assertTrue(any("outside OPML 2.0" in p for p in self.problems()))
+
+    def test_blogroll_relative_url_fails(self):
+        self.blogroll(self.OUTLINE.replace('"https://a.example/feed.xml"', '"/feed.xml"'))
+        self.assertTrue(any("xmlUrl" in p for p in self.problems()))
+
+
+class GeneratedTests(SurfaceTests):
+    """Generation provenance (§5.7) on the item document."""
+
+    def generated(self, html='<p>A <span class="blyg-tk-gen">generated</span> bit.</p>',
+                  wire=None):
+        g = {"sources": [{"id": ID, "version": 1}], "model": "m"}
+        self.ledger[ID]["version"] = 2
+        self.ledger[ID]["changelog"].append(
+            {"version": 2, "at": "2026-01-02T00:00:00Z", "note": None, "kind": "thread"})
+        self.ledger[ID]["generated"] = [dict(g, authored={"sources": ID, "model": "m"})]
+        self.docs[ID] = item_doc(ID, version=2, html=html)
+        self.docs[ID]["generated"] = [g] if wire is None else wire
+
+    def test_generated_passes(self):
+        self.generated()
+        self.assertEqual(self.problems(), [])
+
+    def test_generated_needs_one_wrapper_per_span(self):
+        self.generated(html="<p>A generated bit.</p>")
+        self.assertTrue(any("one entry per span" in p for p in self.problems()))
+
+    def test_generated_carries_no_authoring_state(self):
+        self.generated(wire=[{"sources": [], "model": "m", "prompt": "write it"}])
+        self.assertTrue(any("instruction text" in p for p in self.problems()))
+
+    def test_generated_is_omitted_rather_than_empty(self):
+        self.generated(html="<p>Body.</p>", wire=[])
+        self.ledger[ID].pop("generated")
+        self.assertTrue(any("never empty" in p for p in self.problems()))
+
+    def test_generated_source_must_be_a_published_version(self):
+        self.generated(wire=[{"sources": [{"id": ID, "version": 7}], "model": "m"}])
+        self.assertTrue(any("isn't a version this origin published" in p
+                            for p in self.problems()))
+
+    def test_content_md_carries_no_markers(self):
+        body = 'A {{< blyg-gen >}}b{{< /blyg-gen >}}.\n'
+        self.docs[ID] = item_doc(ID, body=body)
+        self.ledger[ID]["last_hash"] = bs.content_hash(body)
+        self.assertTrue(any("blyg-gen markers" in p for p in self.problems()))
+
+    def test_endcap_carries_no_generated(self):
+        self.ledger[ID].update(version=2, withdrawn=True, last_hash=bs.EMPTY_CONTENT_HASH)
+        self.ledger[ID]["changelog"].append(
+            {"version": 2, "at": "2026-01-02T00:00:00Z", "note": "withdrawn", "kind": "withdrawn"})
+        self.docs[ID] = item_doc(ID, version=2, withdrawn=True)
+        self.docs[ID]["generated"] = [{"sources": []}]
+        self.assertTrue(any("never carries generated" in p for p in self.problems()))
+
+
+def page(canonical, body="", links=()):
+    return (f'<!doctype html><html><head><link rel="canonical" href="{canonical}">'
+            f'<link rel="blyg" href="{ORIGIN}"></head><body>{body}'
+            + "".join(f'<a href="{h}">x</a>' for h in links) + "</body></html>")
+
+
+class PageTests(SurfaceTests):
+    """The HTML pages partials/blyg/pages.html writes (§4, §8.4)."""
+
+    LIVE = f"{ORIGIN}t/{ID}/"
+
+    def setUp(self):
+        super().setUp()
+        self.pages = {"index.html": page(ORIGIN),
+                      f"t/{ID}/index.html": page(self.LIVE, "<p>Body.</p>")}
+
+    def pin_v1(self):
+        self.ledger[ID]["changelog"][0]["pinned"] = True
+        self.docs[ID]["changelog"][0]["pinned"] = True
+        pin = {"blyg": "0.2", "id": ID, "kind": "thread", "version": 1,
+               "at": "2026-01-01T00:00:00Z", "note": None, "pinned": True, "origin": ORIGIN,
+               "content_md": "Body.\n", "content_html": "<p>Body.</p>",
+               "content_hash": bs.content_hash("Body.\n"), "transclusions": []}
+        (self.blyg / "items" / ID).mkdir()
+        (self.blyg / "items" / ID / "v1.json").write_text(json.dumps(pin), encoding="utf-8")
+        self.pages[f"t/{ID}/v1/index.html"] = page(
+            self.LIVE, "<p>Body.</p>", [f"{ORIGIN}items/{ID}/v1.json"])
+        self.pages[f"t/{ID}/index.html"] = page(self.LIVE, "<p>Body.</p>", [f"{self.LIVE}v1/"])
+
+    def test_pinned_page_passes(self):
+        self.pin_v1()
+        self.assertEqual(self.problems(), [])
+
+    def test_missing_live_page_fails(self):
+        del self.pages[f"t/{ID}/index.html"]
+        self.assertTrue(any("live page" in p for p in self.problems()))
+
+    def test_live_page_must_carry_the_live_content(self):
+        self.pages[f"t/{ID}/index.html"] = page(self.LIVE, "<p>Old.</p>")
+        self.assertTrue(any("live content_html" in p for p in self.problems()))
+
+    def test_feed_links_the_live_page(self):
+        self.pages = None  # a feed without <link>s, next to built pages
+        self.write()
+        (self.blyg / "index.html").write_text(page(ORIGIN), encoding="utf-8")
+        (self.blyg / "t" / ID).mkdir(parents=True)
+        (self.blyg / "t" / ID / "index.html").write_text(page(self.LIVE, "<p>Body.</p>"),
+                                                         encoding="utf-8")
+        problems = bv.validate(self.public, self.ledger_path)
+        self.assertTrue(any("<link>" in p for p in problems), problems)
+
+    def test_a_sites_own_feed_page_is_not_item_pages(self):
+        self.pages = None
+        self.write()
+        (self.blyg / "index.html").write_text(page(ORIGIN), encoding="utf-8")
+        self.assertEqual(bv.validate(self.public, self.ledger_path), [])
+
+    def test_unpinned_version_page_fails(self):
+        self.pages[f"t/{ID}/v1/index.html"] = page(self.LIVE, "<p>Body.</p>")
+        self.assertTrue(any("isn't pinned" in p for p in self.problems()))
+
+    def test_missing_pinned_page_fails(self):
+        self.pin_v1()
+        del self.pages[f"t/{ID}/v1/index.html"]
+        self.assertTrue(any("pinned page" in p for p in self.problems()))
+
+    def test_pinned_page_must_be_verbatim(self):
+        self.pin_v1()
+        self.pages[f"t/{ID}/v1/index.html"] = page(
+            self.LIVE, "<p>Body!</p>", [f"{ORIGIN}items/{ID}/v1.json"])
+        self.assertTrue(any("verbatim" in p for p in self.problems()))
+
+    def test_a_minified_pinned_page_still_carries_the_pin(self):
+        self.pin_v1()
+        self.pages[f"t/{ID}/v1/index.html"] = (
+            f"<html><head><link rel=canonical href={self.LIVE}><link rel=blyg href={ORIGIN}>"
+            f"</head><body><p>Body.\n</p><a href={ORIGIN}items/{ID}/v1.json>x</a></body></html>")
+        self.assertEqual(self.problems(), [])
+
+    def test_a_missing_canonical_is_the_sites_call(self):
+        self.pages[f"t/{ID}/index.html"] = (
+            f'<link rel="blyg" href="{ORIGIN}"><p>Body.</p>')
+        self.assertEqual(self.problems(), [])
+
+    def test_pinned_page_is_canonical_to_the_live_page(self):
+        self.pin_v1()
+        self.pages[f"t/{ID}/v1/index.html"] = page(
+            f"{self.LIVE}v1/", "<p>Body.</p>", [f"{ORIGIN}items/{ID}/v1.json"])
+        self.assertTrue(any("rel=canonical" in p for p in self.problems()))
+
+    def test_linking_an_unpinned_version_fails(self):
+        self.pages["index.html"] = page(ORIGIN, links=[f"{ORIGIN}items/{ID}/v1.json"])
+        self.assertTrue(any("unpinned history" in p for p in self.problems()))
+
+    def test_redirect_only_from_a_kind_the_item_had(self):
+        self.pages[f"f/{ID}/index.html"] = (
+            f'<meta http-equiv="refresh" content="0; url={self.LIVE}">')
+        self.assertTrue(any("redirect" in p for p in self.problems()))
+        self.ledger[ID]["changelog"][0]["kind"] = "fragment"
+        self.ledger[ID]["version"] = 2
+        self.ledger[ID]["changelog"].append(
+            {"version": 2, "at": "2026-01-02T00:00:00Z", "note": None, "kind": "thread"})
+        self.docs[ID] = item_doc(ID, version=2)
+        self.assertEqual(self.problems(), [])
 
 
 FRAG = "5cx94j6wbmzrdnnjxvs9j1nkba"

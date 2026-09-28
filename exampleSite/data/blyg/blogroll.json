@@ -1,0 +1,14 @@
+{
+  "feeds": [
+    {
+      "text": "Another blyg",
+      "xmlUrl": "https://example.com/blyg/feed.xml",
+      "htmlUrl": "https://example.com/blyg/"
+    },
+    {
+      "text": "A plain RSS feed",
+      "xmlUrl": "https://example.net/index.xml",
+      "htmlUrl": "https://example.net/"
+    }
+  ]
+}

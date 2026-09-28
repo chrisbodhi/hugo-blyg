@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ if not .IsHome }}{{ .Title }} · {{ end }}{{ site.Title }}</title>
+  {{- /* A pinned page is canonical to its item's live page (§8.4 rule 3). */}}
+  <link rel="canonical" href="{{ .Params.blyg_canonical | default .Permalink }}">
+  {{- /* §12.1 step 4: every page points readers at the blyg origin, so
+         resolving a page doesn't depend on probing /blyg/. */}}
+  <link rel="blyg" href="{{ "blyg/" | absURL }}">
+  {{- partial "blyg/head.html" . }}
+</head>
+<body>
+  <header><a href="{{ site.Home.Permalink }}">{{ site.Title }}</a> · <a href="{{ "blyg/" | absURL }}">blyg</a></header>
+  <main>{{ block "main" . }}{{ end }}</main>
+</body>
+</html>

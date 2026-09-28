@@ -49,7 +49,8 @@
 {{- $contentHTML := "" -}}
 {{- $media := slice -}}
 {{- if not $withdrawn -}}
-  {{- $contentMD = $page.RawContent -}}
+  {{- /* The body minus its blyg-gen markers, which are authoring state (§5.7). */ -}}
+  {{- $contentMD = partial "blyg/content-md.html" $page.RawContent -}}
   {{- $hash := printf "sha256:%s" (crypto.SHA256 $contentMD) -}}
   {{- if ne $hash $entry.last_hash -}}
     {{- errorf "blyg: %s body hashes to %s but the ledger says %s -- run scripts/blyg_stamp.py before building (shipping this would be a same-version stealth edit, §13.3)" $file $hash $entry.last_hash -}}
@@ -90,7 +91,9 @@
   */ -}}
   {{- $snapshots := $entry.transclusions | default slice -}}
   {{- if $snapshots -}}
-    {{- $lines := split $contentMD "\n" -}}
+    {{- /* The source's lines -- blyg-gen markers and all -- which is what the
+           ledger's line numbers count and what renders the wrappers. */ -}}
+    {{- $lines := split $page.RawContent "\n" -}}
     {{- $salt := substr (strings.TrimPrefix "sha256:" $entry.last_hash) 0 16 -}}
     {{- $bakes := slice -}}
     {{- range $i, $s := $snapshots -}}
@@ -102,7 +105,7 @@
       {{- if ne (trim $line " \t\r") (printf "![[%s]]" $s.id) -}}
         {{- errorf "blyg: %s body line %d is %q, but the ledger bakes ![[%s]] there -- rerun scripts/blyg_stamp.py" $file $n $line $s.id -}}
       {{- end -}}
-      {{- if ne (printf "sha256:%s" (crypto.SHA256 $s.content_md)) $s.content_hash -}}
+      {{- if ne (printf "sha256:%s" (crypto.SHA256 (partial "blyg/content-md.html" $s.content_md))) $s.content_hash -}}
         {{- errorf "blyg: %s: the ledger's snapshot of %s v%v doesn't match its content_hash -- a baked snapshot MUST NOT change without a new thread version (§10.4)" $file $s.id $s.version -}}
       {{- end -}}
       {{- $source := false -}}
@@ -222,6 +225,45 @@
   "media" $media
   "changelog" $changelog
 -}}
+{{- /*
+  Generation provenance (§5.7): one entry per blyg-gen span, in document
+  order, with each source pinned by scripts/blyg_stamp.py when the version
+  was published. The body's own markers must still carry the parameters
+  the ledger recorded: changing one without restamping would ship
+  provenance the version never had, and the hash can't see it, since the
+  markers aren't part of content_md. Omitted entirely when there's no
+  generation, and never on an endcap (§5.7 rule 4).
+*/ -}}
+{{- if not $withdrawn -}}
+  {{- $recorded := $entry.generated | default slice -}}
+  {{- $authored := slice -}}
+  {{- range findRESubmatch `\{\{<[ \t]*blyg-gen((?:[ \t]+[a-z]+="[^"]*")*)[ \t]*>\}\}` $page.RawContent -}}
+    {{- $params := dict -}}
+    {{- range findRESubmatch `([a-z]+)="([^"]*)"` (index . 1) -}}
+      {{- $params = merge $params (dict (index . 1) (index . 2)) -}}
+    {{- end -}}
+    {{- $authored = $authored | append $params -}}
+  {{- end -}}
+  {{- $want := slice -}}
+  {{- range $recorded -}}{{- $want = $want | append (.authored | default dict) -}}{{- end -}}
+  {{- if ne (jsonify $authored) (jsonify $want) -}}
+    {{- errorf "blyg: %s's blyg-gen spans say %s but the ledger recorded %s -- generation provenance is part of the version; run scripts/blyg_stamp.py" $file (jsonify $authored) (jsonify $want) -}}
+  {{- end -}}
+  {{- if $recorded -}}
+    {{- $generated := slice -}}
+    {{- range $recorded -}}
+      {{- $sources := slice -}}
+      {{- range .sources -}}
+        {{- $sources = $sources | append (dict "id" .id "version" (int .version)) -}}
+      {{- end -}}
+      {{- $g := dict "sources" $sources -}}
+      {{- with .model -}}{{- $g = merge $g (dict "model" .) -}}{{- end -}}
+      {{- with .at -}}{{- $g = merge $g (dict "at" .) -}}{{- end -}}
+      {{- $generated = $generated | append $g -}}
+    {{- end -}}
+    {{- $doc = merge $doc (dict "generated" $generated) -}}
+  {{- end -}}
+{{- end -}}
 {{- if eq $entry.kind "thread" -}}
   {{- /* §10.3: {id, version} in directive order; [] for an endcap. */ -}}
   {{- $provenance := slice -}}

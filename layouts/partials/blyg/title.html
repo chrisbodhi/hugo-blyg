@@ -1,0 +1,25 @@
+{{- /*
+  A page title for an item, from its ledger entry: the first line of its
+  source text, roughly de-Markdowned and cut to 70 characters -- items
+  have no title of their own (§5), and the content adapter that needs
+  this runs before anything can be rendered, so it reads the file. A
+  withdrawn item is titled "Withdrawn"; nothing of its text remains.
+*/ -}}
+{{- $title := "" -}}
+{{- if .withdrawn -}}
+  {{- $title = "Withdrawn" -}}
+{{- else -}}
+  {{- $body := replaceRE `(?s)\A\+\+\+\n.*?\n\+\+\+\n?` "" (os.ReadFile .path) -}}
+  {{- range split (partial "blyg/content-md.html" $body) "\n" -}}
+    {{- $line := trim . " \t\r" -}}
+    {{- if and (not $title) $line (not (findRE `^!\[\[` $line 1)) -}}
+      {{- $line = replaceRE `!?\[([^\]]*)\]\([^)]*\)` "$1" $line -}}
+      {{- $line = replaceRE `^(#+|>|[-*+]|\d+\.)\s+` "" $line -}}
+      {{- $title = trim (replaceRE "[*_`]" "" $line) " " -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if gt (strings.RuneCount $title) 70 -}}
+    {{- $title = printf "%s…" (strings.TrimRight " " (substr $title 0 69)) -}}
+  {{- end -}}
+{{- end -}}
+{{- return $title | default (printf "%s %s" .kind (path.Base .path)) -}}

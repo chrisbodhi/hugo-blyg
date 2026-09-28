@@ -1017,6 +1017,174 @@ class AmendTests(StampHelpers):
         self.assertEqual(self.ledger()[blyg_id]["version"], 3)
 
 
+OPEN = '{{< blyg-gen model="m" >}}'
+CLOSE = "{{< /blyg-gen >}}"
+
+
+class GenMarkupTests(unittest.TestCase):
+    """§5.7: blyg-gen markers are authoring state, stripped from content_md."""
+
+    def parse(self, body):
+        return bs.parse_gen(Path("p.md"), body)
+
+    def test_block_marker_lines_go_entirely(self):
+        body = f"Before.\n\n{OPEN}\nGenerated.\n{CLOSE}\n\nAfter.\n"
+        self.assertEqual(bs.strip_gen_markers(body), "Before.\n\nGenerated.\n\nAfter.\n")
+        [span] = self.parse(body)
+        self.assertEqual((span.line, span.end, span.block, span.params), (3, 5, True, {"model": "m"}))
+
+    def test_inline_markers_go_on_their_own(self):
+        body = f"Some {OPEN}generated{CLOSE} words, {OPEN}twice{CLOSE}.\n"
+        self.assertEqual(bs.strip_gen_markers(body), "Some generated words, twice.\n")
+        self.assertEqual([s.block for s in self.parse(body)], [False, False])
+
+    def test_escaped_shortcode_is_inert_text(self):
+        body = "Write {{</* blyg-gen */>}} to mark a span.\n"
+        self.assertEqual(bs.strip_gen_markers(body), body)
+        self.assertEqual(self.parse(body), [])
+
+    def refused(self, body, why):
+        with self.assertRaisesRegex(bs.BlygStampError, why):
+            self.parse(body)
+
+    def test_block_needs_blank_lines_around_it(self):
+        self.refused(f"Before.\n{OPEN}\nGenerated.\n{CLOSE}\n", "blank line before")
+        self.refused(f"{OPEN}\nGenerated.\n{CLOSE}\nAfter.\n", "blank line after")
+
+    def test_unbalanced_nested_and_empty_spans(self):
+        self.refused(f"{OPEN}\nGenerated.\n", "never closes")
+        self.refused(f"Text.\n\n{CLOSE}\n", "closes nothing")
+        self.refused(f"{OPEN}\n\n{OPEN}\nx\n{CLOSE}\n\n{CLOSE}\n", "don't nest")
+        self.refused(f"{OPEN}\n\n{CLOSE}\n", "empty")
+        self.refused(f"A {OPEN} {CLOSE} b.\n", "empty")
+
+    def test_inline_span_stays_on_one_line(self):
+        self.refused(f"A {OPEN}b\nc{CLOSE} d.\n", "same line")
+
+    def test_only_sources_model_and_at(self):
+        self.refused('{{< blyg-gen prompt="write me a poem" >}}\nx\n' + CLOSE + "\n",
+                     "MUST NOT carry instruction text")
+        self.refused('A {{< blyg-gen at="yesterday" >}}b' + CLOSE + "\n", "ISO 8601")
+        self.refused('A {{< blyg-gen sources="nope" >}}b' + CLOSE + "\n", "isn't an item id")
+
+    def test_other_shortcode_forms_are_refused(self):
+        self.refused("A {{% blyg-gen %}}b{{% /blyg-gen %}}\n", "malformed")
+        self.refused("A {{< blyg-gen model=m >}}b" + CLOSE + "\n", "malformed")
+
+    def test_no_transclusion_inside_a_generated_block(self):
+        self.refused(f"{OPEN}\n![[{'0' * 26}]]\n{CLOSE}\n", "quotation, never generation")
+
+
+class GenerationTests(StampHelpers):
+    """§5.7 provenance, recorded at publish time."""
+
+    FRAG = FM + 'blyg_kind = "fragment"\n'
+
+    def setUp(self):
+        super().setUp()
+        self.source = self.first("a-source.md", fm=self.FRAG, body="Source text.\n")
+
+    def add(self, name, fm=FM, body="Body.\n"):
+        """Write and stamp one file; its id (StampHelpers.first returns the
+        first plan's, and a-source.md sorts first)."""
+        write_post(self.content_dir, name, fm, body)
+        return next(p.blyg_id for p in self.stamp() if p.path.name == name)
+
+    def gen_body(self, sources, text="Generated."):
+        return f'Intro.\n\n{{{{< blyg-gen sources="{sources}" model="m" >}}}}\n{text}\n{CLOSE}\n'
+
+    def test_content_hash_covers_content_md_without_markers(self):
+        blyg_id = self.add("b.md", body=self.gen_body(self.source))
+        entry = self.ledger()[blyg_id]
+        self.assertEqual(entry["last_hash"], bs.content_hash("Intro.\n\nGenerated.\n"))
+        self.assertEqual(entry["generated"], [{
+            "sources": [{"id": self.source, "version": 1}], "model": "m",
+            "authored": {"sources": self.source, "model": "m"}}])
+
+    def test_sources_pin_the_version_published_before_this_run(self):
+        # The source moves to v2 in the same run: the span drew on v1.
+        self.edit("a-source.md", "Source text.", "Source, edited.")
+        blyg_id = self.add("b.md", body=self.gen_body(f"{self.source}, {self.source}@v1"))
+        [g] = self.ledger()[blyg_id]["generated"]
+        self.assertEqual(g["sources"], [{"id": self.source, "version": 1}] * 2)
+
+    def test_unresolvable_sources_are_refused(self):
+        for sources, why in ((f"{'0' * 26}", "isn't a published item"),
+                             (f"{self.source}@v2", "never published v2")):
+            write_post(self.content_dir, "b.md", FM, self.gen_body(sources))
+            with self.assertRaisesRegex(bs.BlygStampError, why):
+                self.stamp()
+
+    def test_a_withdrawn_source_needs_an_explicit_version(self):
+        self.edit("a-source.md", 'blyg_kind = "fragment"', 'blyg_kind = "fragment"\nblyg_withdrawn = true')
+        self.stamp()
+        write_post(self.content_dir, "b.md", FM, self.gen_body(self.source))
+        with self.assertRaisesRegex(bs.BlygStampError, "withdrawn now"):
+            self.stamp()
+        write_post(self.content_dir, "b.md", FM, self.gen_body(f"{self.source}@v1"))
+        self.stamp()
+        with self.assertRaisesRegex(bs.BlygStampError, "withdrawal endcap"):
+            write_post(self.content_dir, "c.md", FM, self.gen_body(f"{self.source}@v2"))
+            self.stamp()
+
+    def test_a_parameter_change_is_a_new_version(self):
+        blyg_id = self.add("b.md", body=self.gen_body(self.source))
+        self.edit("b.md", 'model="m"', 'model="m2"')
+        self.assertEqual(self.stamp()[1].kind, "bump")
+        entry = self.ledger()[blyg_id]
+        self.assertEqual((entry["version"], entry["generated"][0]["model"]), (2, "m2"))
+        self.assertEqual(entry["last_hash"], bs.content_hash("Intro.\n\nGenerated.\n"))
+
+    def test_no_cascade_from_a_later_source_edit(self):
+        blyg_id = self.add("b.md", body=self.gen_body(self.source))
+        self.edit("a-source.md", "Source text.", "Source, edited.")
+        plans = {p.path.name: p.kind for p in self.stamp()}
+        self.assertEqual(plans["b.md"], "noop")
+        self.assertEqual(self.ledger()[blyg_id]["generated"][0]["sources"][0]["version"], 1)
+
+    def test_republishing_re_resolves_a_bare_source(self):
+        blyg_id = self.add("b.md", body=self.gen_body(self.source))
+        self.edit("a-source.md", "Source text.", "Source, edited.")
+        self.stamp()
+        self.edit("b.md", "Generated.", "Generated again.")
+        self.stamp()
+        self.assertEqual(self.ledger()[blyg_id]["generated"][0]["sources"][0]["version"], 2)
+
+    def test_endcap_carries_no_generated_and_return_resolves_afresh(self):
+        blyg_id = self.add("b.md", body=self.gen_body(self.source))
+        self.edit("b.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        self.stamp()
+        self.assertNotIn("generated", self.ledger()[blyg_id])
+        self.edit("b.md", "blyg_withdrawn = true", "")
+        self.stamp()
+        self.assertEqual(len(self.ledger()[blyg_id]["generated"]), 1)
+
+    def test_amend_revert_restores_the_shipped_provenance(self):
+        blyg_id = self.add("b.md", body=self.gen_body(self.source))
+        shipped = self.ledger()
+        self.edit("b.md", 'model="m"', 'model="m2"')
+        self.stamp(published=shipped)
+        self.edit("b.md", 'model="m2"', 'model="m"')
+        self.assertEqual(self.stamp(published=shipped)[1].kind, "revert")
+        self.assertEqual(self.ledger()[blyg_id], shipped[blyg_id])
+
+    def test_transclusion_snapshot_keeps_the_markers_and_hashes_without(self):
+        frag_body = f"Quoted {OPEN}generated{CLOSE} bit.\n"
+        frag = self.add("c-frag.md", fm=self.FRAG, body=frag_body)
+        thread = self.add("d-thread.md", body=f"Intro.\n\n![[{frag}]]\n")
+        [snap] = self.ledger()[thread]["transclusions"]
+        self.assertEqual(snap["content_md"], frag_body)
+        self.assertEqual(snap["content_hash"], self.ledger()[frag]["last_hash"])
+        self.assertNotIn("generated", self.ledger()[thread])
+
+    def test_pin_document_carries_generated(self):
+        built = {"blyg": "0.2", "id": "x", "kind": "fragment", "origin": "o",
+                 "content_md": "", "content_html": "", "content_hash": "h",
+                 "generated": [{"sources": [], "model": "m"}]}
+        doc = bs.build_pin_document(built, {"version": 1, "at": "t", "note": None})
+        self.assertEqual(doc["generated"], built["generated"])
+
+
 class FragmentCapTests(StampHelpers):
     def test_long_fragment_warns_but_publishes(self):
         write_post(self.content_dir, "f.md", FM + 'blyg_kind = "fragment"\n', "x" * 2001)

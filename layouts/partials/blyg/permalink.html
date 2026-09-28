@@ -1,0 +1,11 @@
+{{- /*
+  An item's live HTML permalink (§8.4): {origin}f/{id}/ for a fragment,
+  {origin}t/{id}/ for a thread -- the spec's own paths. Keyed on the
+  ledger's authored kind, which a withdrawn item keeps, so withdrawal
+  doesn't move the page. Also takes "kind" directly, for a pinned
+  version, whose page lives under the kind that version had.
+
+    {{ partial "blyg/permalink.html" (dict "id" $id "kind" $entry.kind "base" site.BaseURL) }}
+*/ -}}
+{{- $dir := cond (eq .kind "fragment") "f" "t" -}}
+{{- return printf "%s/blyg/%s/%s/" (strings.TrimSuffix "/" .base) $dir .id -}}

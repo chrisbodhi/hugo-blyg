@@ -43,6 +43,11 @@ URL_ATTRS = {"href", "src", "poster", "cite", "action", "formaction", "data",
 EMBED_TAGS = {"img", "source", "video", "audio", "track", "embed", "object", "input"}
 CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)([^'\")]*)\1\s*\)")
 SAFE_SCHEMES = ("http:", "https:", "mailto:", "tel:", "data:")
+# Every <outline> attribute OPML 2.0 defines (common, subscription-list,
+# and link/include types); anything else would be an extension (§11).
+OPML_OUTLINE_ATTRS = {"text", "type", "isComment", "isBreakpoint", "created",
+                      "category", "description", "htmlUrl", "language", "title",
+                      "version", "xmlUrl", "url"}
 
 
 class Problems(list):
@@ -60,12 +65,25 @@ class _HTMLCollector(html.parser.HTMLParser):
         self.refs: list[tuple[str, str, str]] = []  # (tag, attr, url)
         # (data-blyg-id, data-blyg-version) of every §10.2 wrapper, in order
         self.transclusions: list[tuple[str | None, str | None]] = []
+        # blyg-tk-gen wrappers (§5.7) outside any transclusion: this
+        # version's own generated spans, not ones quoted with a fragment
+        self.generated = 0
+        self._blockquotes: list[bool] = []  # open <blockquote>s: a transclusion?
+
+    def handle_endtag(self, tag):
+        if tag == "blockquote" and self._blockquotes:
+            self._blockquotes.pop()
 
     def handle_starttag(self, tag, attrs):
+        classes = (dict(attrs).get("class") or "").split()
         if tag == "blockquote":
             a = dict(attrs)
-            if "blyg-transclusion" in (a.get("class") or "").split():
+            quoted = "blyg-transclusion" in classes
+            self._blockquotes.append(quoted)
+            if quoted:
                 self.transclusions.append((a.get("data-blyg-id"), a.get("data-blyg-version")))
+        if tag in ("span", "div") and "blyg-tk-gen" in classes and not any(self._blockquotes):
+            self.generated += 1
         for name, value in attrs:
             if value is None:
                 continue
@@ -145,14 +163,111 @@ def check_manifest(public_blyg: Path, problems: Problems) -> dict | None:
         problems.add("blyg.json", "site must be the origin base URL, ending in /")
     if not is_iso_z(manifest.get("updated")):
         problems.add("blyg.json", f"updated {manifest.get('updated')!r} is not ISO 8601 UTC")
-    if "blogroll" in manifest and not (public_blyg / "blogroll.opml").is_file():
-        problems.add("blyg.json", "blogroll key present but blogroll.opml isn't served (§6.1)")
-    if "author" in manifest and not isinstance(manifest["author"], dict):
-        problems.add("blyg.json", "author must be an object")
+    if "author" in manifest:
+        author = manifest["author"]
+        if not isinstance(author, dict):
+            problems.add("blyg.json", "author must be an object (§6.1)")
+        elif "name" in author and not (isinstance(author["name"], str) and author["name"]):
+            problems.add("blyg.json", f"author.name is {author['name']!r}; omit author "
+                                      f"rather than assert an empty one (§6.1)")
     return manifest
 
 
-def check_item(blyg_id: str, entry: dict, origin: str, public_blyg: Path,
+def check_blogroll(public_blyg: Path, manifest: dict, problems: Problems) -> None:
+    """§11: blogroll.opml is standard OPML 2.0 with no extensions, one
+    `type="rss"` outline per shown subscription, and exists exactly when
+    the manifest's `blogroll` key names it -- a blyg with nothing to show
+    serves no file and omits the key (§6.1)."""
+    where = "blogroll.opml"
+    path = public_blyg / where
+    key = manifest.get("blogroll")
+    if key is None:
+        if path.is_file():
+            problems.add(where, "served, but blyg.json has no blogroll key (§6.1) -- "
+                                "a leftover from an earlier build? (hugo --cleanDestinationDir)")
+        return
+    if key != where:
+        problems.add("blyg.json", f"blogroll is {key!r}; the filename is protocol-fixed "
+                                  f"as {where!r} (§11)")
+    if not path.is_file():
+        problems.add("blyg.json", f"blogroll key present but {where} isn't served (§6.1)")
+        return
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        problems.add(where, f"unparseable: {exc}")
+        return
+    if root.tag != "opml" or root.get("version") != "2.0":
+        problems.add(where, "not an OPML 2.0 document (§11)")
+    if root.find("head") is None or root.find("body") is None:
+        problems.add(where, "OPML needs <head> and <body>")
+        return
+    outlines = list(root.find("body").iter("outline"))
+    if not outlines:
+        problems.add(where, "no entries -- a blyg with nothing to show serves no "
+                            "blogroll.opml and omits the manifest key (§11)")
+    for n, o in enumerate(outlines, start=1):
+        w = f"{where} outline {n}"
+        extra = sorted(set(o.attrib) - OPML_OUTLINE_ATTRS)
+        if extra:
+            problems.add(w, f"carries {extra}, outside OPML 2.0 -- the blogroll has "
+                            f"no blyg-specific attributes (§11)")
+        if o.get("type") != "rss" or not o.get("text"):
+            problems.add(w, 'every entry is type="rss" with a text display title (§11)')
+        for attr in ("xmlUrl", "htmlUrl"):
+            parts = urlsplit(o.get(attr) or "")
+            if parts.scheme not in ("http", "https") or not parts.netloc:
+                problems.add(w, f"{attr} {o.get(attr)!r} isn't an absolute http(s) URL (§11)")
+
+
+def wire_generated(recorded: list[dict]) -> list[dict]:
+    """The item document's `generated` from the ledger's: the §5.7 members
+    only (the authored parameters are ledger-private)."""
+    return [{k: g[k] for k in ("sources", "model", "at") if k in g} for g in recorded]
+
+
+def check_generated(where: str, generated, ledger: dict, problems: Problems) -> None:
+    """§5.7: a non-empty array, one entry per generated span, each naming
+    exact published versions of this origin's items as `sources`, with
+    optional model and at -- and nothing else, since the array MUST NOT
+    carry instruction text or other authoring state."""
+    if not isinstance(generated, list) or not generated:
+        problems.add(where, "generated is omitted entirely when a version involved no "
+                            "generation, never empty (§5.7 rule 4)")
+        return
+    for n, g in enumerate(generated, start=1):
+        w = f"{where} generated[{n}]"
+        if not isinstance(g, dict):
+            problems.add(w, "must be an object")
+            continue
+        extra = sorted(set(g) - {"sources", "model", "at"})
+        if extra:
+            problems.add(w, f"carries {extra} -- only sources, model and at: no "
+                            f"instruction text or other authoring state (§5.7 rule 2)")
+        if "model" in g and not (isinstance(g["model"], str) and g["model"]):
+            problems.add(w, "model must be a non-empty string")
+        if "at" in g and not is_iso_z(g["at"]):
+            problems.add(w, f"at {g['at']!r} isn't ISO 8601 UTC (§4)")
+        sources = g.get("sources")
+        if not isinstance(sources, list):
+            problems.add(w, "sources must be an array (possibly empty) (§5.7 rule 1)")
+            continue
+        for src in sources:
+            sid = src.get("id") if isinstance(src, dict) else None
+            version = src.get("version") if isinstance(src, dict) else None
+            if not isinstance(src, dict) or set(src) != {"id", "version"}:
+                problems.add(w, f"source {src!r} must be exactly {{id, version}}")
+                continue
+            changelog = (ledger.get(sid) or {}).get("changelog", [])
+            if not isinstance(version, int) or not 1 <= version <= len(changelog):
+                problems.add(w, f"source {sid} v{version} isn't a version this origin "
+                                f"published (§5.7 rule 1)")
+            elif changelog[version - 1].get("kind") == "withdrawn":
+                problems.add(w, f"source {sid} v{version} is a withdrawal endcap, with no "
+                                f"content to draw on")
+
+
+def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg: Path,
                problems: Problems) -> dict | None:
     where = f"items/{blyg_id}.json"
     path = public_blyg / "items" / f"{blyg_id}.json"
@@ -171,9 +286,8 @@ def check_item(blyg_id: str, entry: dict, origin: str, public_blyg: Path,
         problems.add(where, f"id {doc.get('id')!r} doesn't match file name / isn't a blyg id")
     if doc.get("origin") != origin:
         problems.add(where, f"origin {doc.get('origin')!r} != manifest site {origin!r}")
-    for reserved in ("forked_from", "generated"):
-        if reserved in doc:
-            problems.add(where, f"carries {reserved!r}, which this publisher never emits (§5.6/§5.7)")
+    if "forked_from" in doc:
+        problems.add(where, "carries 'forked_from', reserved for L2 (§5.6)")
 
     kind = doc.get("kind")
     withdrawn = bool(entry.get("withdrawn"))
@@ -233,10 +347,21 @@ def check_item(blyg_id: str, entry: dict, origin: str, public_blyg: Path,
     if not isinstance(media, list):
         problems.add(where, "media must be an array")
         media = []
+    recorded = [] if withdrawn else wire_generated(entry.get("generated", []))
+    if "generated" in doc:
+        check_generated(where, doc["generated"], ledger, problems)
+    if doc.get("generated", []) != recorded:
+        problems.add(where, f"generated {doc.get('generated')!r} != the ledger's "
+                            f"{recorded!r} (§5.7)")
     if withdrawn:
         if content_md or content_html or media:
             problems.add(where, "withdrawal endcap MUST have empty content_md/content_html and media [] (§9)")
+        if "generated" in doc:
+            problems.add(where, "a withdrawal endcap never carries generated (§5.7 rule 4, §9)")
         return doc
+    if bs.GEN_ANY_RE.search(content_md):
+        problems.add(where, "content_md carries blyg-gen markers -- the published "
+                            "markdown carries no authoring markup (§5.7)")
 
     directives = [(lineno, line, bs.DIRECTIVE_RE.match(line).group(1))
                   for lineno, line, _ in bs.find_directives(content_md)]
@@ -249,7 +374,12 @@ def check_item(blyg_id: str, entry: dict, origin: str, public_blyg: Path,
                             f"transclusions {[t['id'] for t in baked]} -- every directive "
                             f"MUST resolve, in directive order (§10.2, §10.3)")
     check_content_html(where, content_html, origin, public_blyg, problems)
-    wrappers = _collect(content_html).transclusions
+    collected = _collect(content_html)
+    if collected.generated != len(doc.get("generated", [])):
+        problems.add(where, f"content_html wraps {collected.generated} generated span(s) as "
+                            f"blyg-tk-gen, but generated lists {len(doc.get('generated', []))} "
+                            f"-- one entry per span (§5.7)")
+    wrappers = collected.transclusions
     want = [(t["id"], str(t["version"])) for t in baked]
     if is_thread and wrappers != want:
         problems.add(where, f"content_html bakes {wrappers} but transclusions says {want} -- "
@@ -391,11 +521,212 @@ def check_pins(public_blyg: Path, ledger: dict, origin: str, problems: Problems)
                     problems.add(where, "origin != manifest site")
                 if "media" in doc:
                     problems.add(where, "pinned documents carry no media array (§8 rule 4)")
+                if "generated" in doc:
+                    # §5.7 rule 5: a pinned version carries its own provenance.
+                    check_generated(where, doc["generated"], ledger, problems)
     for blyg_id, entry in ledger.items():
         for c in entry["changelog"]:
             if c.get("pinned") and (blyg_id, c["version"]) not in served:
                 problems.add(f"items/{blyg_id}/v{c['version']}.json",
                              "ledger records a pin but the file isn't served -- MUST return 200 forever (§8)")
+
+
+def permalink(origin: str, blyg_id: str, kind: str) -> str:
+    """An item's live HTML page (§8.4): f/{id}/ for a fragment, t/{id}/
+    for a thread, keyed on the authored kind (which withdrawal keeps)."""
+    return f"{origin}{'f' if kind == 'fragment' else 't'}/{blyg_id}/"
+
+
+class _PageCollector(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rels: dict[str, list[str]] = {}  # <link rel> -> hrefs
+        self.hrefs: list[str] = []            # every href on the page
+        self.refresh: str | None = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "link":
+            for rel in (a.get("rel") or "").split():
+                self.rels.setdefault(rel, []).append(a.get("href") or "")
+        if a.get("href"):
+            self.hrefs.append(a["href"])
+        if tag == "meta" and (a.get("http-equiv") or "").lower() == "refresh":
+            self.refresh = (a.get("content") or "").partition("url=")[2] or None
+
+
+VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+             "meta", "source", "track", "wbr"}
+
+
+class _Markup(html.parser.HTMLParser):
+    """HTML as a list of tokens that an HTML minifier doesn't change:
+    tags with their (sorted) attributes, and text with whitespace runs
+    collapsed. Quoting, entity spelling, attribute order, self-closing
+    slashes and inter-tag whitespace all drop out."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tokens: list[tuple] = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tokens.append(("<", tag, tuple(sorted((k, v or "") for k, v in attrs))))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag not in VOID_TAGS:
+            self.tokens.append(("</", tag))
+
+    def handle_data(self, data):
+        text = " ".join(data.split())
+        if text:
+            self.tokens.append(("text", text))
+
+
+def markup(fragment: str) -> list[tuple]:
+    parser = _Markup()
+    parser.feed(fragment)
+    parser.close()
+    return parser.tokens
+
+
+def carries(page_html: str, content_html: str) -> bool:
+    """Whether a page carries `content_html` as-is: the same markup, in one
+    unbroken run. Not a byte comparison: a site that builds with
+    `hugo --minify` minifies these pages like its others -- quoting,
+    whitespace -- which changes bytes but not one element, attribute or
+    word of the content. (The byte-exact citation is the JSON twin.)"""
+    want, have = markup(content_html), markup(page_html)
+    if not want:
+        return True
+    return any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
+
+
+def _page(path: Path) -> tuple[str, _PageCollector]:
+    text = path.read_text(encoding="utf-8")
+    collector = _PageCollector()
+    collector.feed(text)
+    collector.close()
+    return text, collector
+
+
+def pages_built(public_blyg: Path) -> bool:
+    """Whether this build wrote the HTML pages ([params.blyg] pages). Told
+    by what only the module writes -- the item-page directories, or feed
+    entries linking item pages -- never by blyg/index.html, which a site
+    with pages off may well serve itself."""
+    if any((public_blyg / p).is_dir() for p in ("f", "t")):
+        return True
+    try:
+        root = ET.parse(public_blyg / "feed.xml").getroot()
+    except (OSError, ET.ParseError):
+        return False  # check_feed reports it
+    return any(item.find("link") is not None for item in root.iter("item"))
+
+
+def check_pages(public_blyg: Path, ledger: dict, docs: dict, origin: str,
+                problems: Problems) -> None:
+    """§8.4 and §4's human-readable HTML, when the build wrote it: every
+    item has its live permalink page; a pinned page exists exactly for
+    each pin (404 otherwise), carrying the pin's content_html unaltered
+    and linking its JSON twin; and no page anywhere links a version the
+    origin doesn't promise forever -- the live one and pins (§8.4).
+
+    The pages render inside the site's own baseof.html, so rel="canonical"
+    is the site's head's to emit: it's checked where present (a wrong one
+    is worse than none), but a missing one isn't a problem."""
+    if not pages_built(public_blyg):
+        return
+    if not (public_blyg / "index.html").is_file():
+        problems.add("index.html", "item pages are built, but the feed page isn't -- "
+                                   "add \"html\" to the section's outputs in "
+                                   "content/blyg/_index.md")
+    pinned = {(i, c["version"]) for i, e in ledger.items()
+              for c in e["changelog"] if c.get("pinned")}
+    pages: list[Path] = [public_blyg / "index.html"]
+
+    for blyg_id, entry in sorted(ledger.items()):
+        live = permalink(origin, blyg_id, entry["kind"])
+        where = live[len(origin):] + "index.html"
+        path = public_blyg / where
+        if not path.is_file():
+            problems.add(where, f"missing -- {blyg_id}'s live page")
+            continue
+        text, page = _page(path)
+        if page.rels.get("canonical", [live]) != [live]:
+            problems.add(where, f"rel=canonical is {page.rels.get('canonical')}, not {live}")
+        if page.rels.get("blyg") != [origin]:
+            problems.add(where, f"<link rel=\"blyg\"> MUST name the origin {origin} (§12.1)")
+        doc = docs.get(blyg_id) or {}
+        if doc.get("kind") not in (None, "withdrawn") and not carries(text, doc.get("content_html", "")):
+            problems.add(where, "doesn't carry the item's live content_html")
+
+        for n in sorted(v for i, v in pinned if i == blyg_id):
+            pin_json = public_blyg / "items" / blyg_id / f"v{n}.json"
+            try:
+                pin = json.loads(pin_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue  # check_pins reports it
+            pw = permalink(origin, blyg_id, pin.get("kind"))[len(origin):] + f"v{n}/index.html"
+            if not (public_blyg / pw).is_file():
+                problems.add(pw, f"missing -- {blyg_id} v{n} is pinned, and a pinned page "
+                                 f"MUST return 200 forever once served (§8.4 rule 1)")
+                continue
+            ptext, ppage = _page(public_blyg / pw)
+            if not carries(ptext, pin.get("content_html", "")):
+                problems.add(pw, "MUST carry the pinned version's publish-time content_html "
+                                 "verbatim (§8.4 rule 2)")
+            if ppage.rels.get("canonical", [live]) != [live]:
+                problems.add(pw, f"rel=canonical SHOULD point at the live page {live} (§8.4 rule 3)")
+            if f"{origin}items/{blyg_id}/v{n}.json" not in ppage.hrefs:
+                problems.add(pw, f"SHOULD link its v{n}.json twin (§8.4 rule 3)")
+
+    for kind_dir in ("f", "t"):
+        d = public_blyg / kind_dir
+        if not d.is_dir():
+            continue
+        for item_dir in sorted(d.iterdir()):
+            blyg_id = item_dir.name
+            entry = ledger.get(blyg_id)
+            if entry is None:
+                problems.add(f"{kind_dir}/{blyg_id}/", "served, but not in the ledger")
+                continue
+            live = permalink(origin, blyg_id, entry["kind"])
+            kind = "fragment" if kind_dir == "f" else "thread"
+            for child in sorted(item_dir.iterdir()):
+                where = f"{kind_dir}/{blyg_id}/{child.name}"
+                m = re.fullmatch(r"v([1-9][0-9]*)", child.name)
+                if child.name == "index.html":
+                    pages.append(child)
+                    if kind == entry["kind"]:
+                        continue  # the live page, checked above
+                    _, page = _page(child)
+                    had = any(c.get("kind") == kind for c in entry["changelog"])
+                    if not had or page.refresh != live:
+                        problems.add(where, f"only the live page {live}, or a redirect to it "
+                                            f"from a kind the item once had, belongs here")
+                elif m and child.is_dir():
+                    pages.append(child / "index.html")
+                    if (blyg_id, int(m.group(1))) not in pinned:
+                        problems.add(where + "/", f"served, but v{m.group(1)} isn't pinned -- a "
+                                                  f"pinned page MUST 404 unless it is (§8.4 rule 1)")
+                else:
+                    problems.add(where, "unexpected")
+
+    version_link = re.compile(re.escape(origin) + r"(?:[ft]/|items/)(" + bs.BLYG_ID_RE_SRC
+                              + r")/v([1-9][0-9]*)(?:/|\.json)")
+    for path in pages:
+        if not path.is_file():
+            continue
+        _, page = _page(path)
+        for href in page.hrefs:
+            m = version_link.match(href)
+            if m and (m.group(1), int(m.group(2))) not in pinned:
+                problems.add(str(path.relative_to(public_blyg)),
+                             f"links {href}, an unpinned version -- a version display MUST "
+                             f"NOT offer access to unpinned history (§8.4)")
 
 
 def check_feed(public_blyg: Path, ledger: dict, docs: dict, manifest: dict,
@@ -419,6 +750,7 @@ def check_feed(public_blyg: Path, ledger: dict, docs: dict, manifest: dict,
         if channel.find(name) is None:
             problems.add(where, f"channel lacks <{name}> (RSS 2.0)")
 
+    with_pages = pages_built(public_blyg)
     entries = channel.findall("item")
     if len(entries) > FEED_WINDOW:
         problems.add(where, f"{len(entries)} entries; window is {FEED_WINDOW} (§7)")
@@ -449,6 +781,11 @@ def check_feed(public_blyg: Path, ledger: dict, docs: dict, manifest: dict,
             problems.add(w, "blyg:created != item document's created")
         if item.findtext(q("item")) != f"{origin}items/{blyg_id}.json":
             problems.add(w, "blyg:item doesn't point at the item document")
+        link = item.findtext("link")
+        if with_pages and link != permalink(origin, blyg_id, entry["kind"]):
+            problems.add(w, f"<link> {link!r} isn't the item's live page")
+        elif not with_pages and link is not None:
+            problems.add(w, f"<link> {link!r}, but no item pages were built")
         description = item.findtext("description") or ""
         # --minify trims the text node's edge whitespace; the HTML is the same.
         if description.strip() != doc.get("content_html", "").strip():
@@ -490,10 +827,11 @@ def validate(public_dir: Path, ledger_path: Path) -> Problems:
     if manifest is None:
         return problems
     origin = manifest.get("site", "")
+    check_blogroll(public_blyg, manifest, problems)
 
     docs = {}
     for blyg_id, entry in sorted(ledger.items()):
-        doc = check_item(blyg_id, entry, origin, public_blyg, problems)
+        doc = check_item(blyg_id, entry, ledger, origin, public_blyg, problems)
         if doc is not None:
             docs[blyg_id] = doc
     items_dir = public_blyg / "items"
@@ -507,6 +845,7 @@ def validate(public_dir: Path, ledger_path: Path) -> Problems:
     check_snapshots(public_blyg, ledger, docs, problems)
     check_index(public_blyg, ledger, docs, problems)
     check_pins(public_blyg, ledger, origin, problems)
+    check_pages(public_blyg, ledger, docs, origin, problems)
     check_feed(public_blyg, ledger, docs, manifest, origin, problems)
     return problems
 

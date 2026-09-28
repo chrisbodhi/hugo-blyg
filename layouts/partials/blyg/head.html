@@ -1,0 +1,35 @@
+{{- /*
+  Optional <head> links for the blyg pages, for the site's baseof.html to
+  include in its <head>:
+
+    {{ partial "blyg/head.html" . }}
+
+  It emits nothing on the site's other pages. On blyg pages it adds the
+  feed's rel="alternate" (so plain RSS autodiscovery, §12 step 6, finds
+  it), the JSON twin of an item or pinned page, and on the feed page the
+  blogroll (§11 SHOULD) when one is served.
+
+  It doesn't emit rel="canonical", since most sites' heads already do,
+  from .Permalink. A pinned page SHOULD be canonical to the live page
+  (§8.4 rule 3) and carries it as .Params.blyg_canonical, so the site's
+  own canonical link should prefer that:
+
+    <link rel="canonical" href="{{ .Params.blyg_canonical | default .Permalink }}">
+*/ -}}
+{{- $origin := printf "%s/blyg/" (strings.TrimSuffix "/" site.BaseURL) -}}
+{{- $blyg := or .Params.blyg_page (and .IsSection (eq .Section "blyg")) -}}
+{{- if $blyg }}
+<link rel="alternate" type="application/rss+xml" title="{{ site.Title }}" href="{{ $origin }}feed.xml">
+{{- with .Params.blyg_id }}
+  {{- if $.Params.blyg_version }}
+<link rel="alternate" type="application/json" href="{{ $origin }}items/{{ . }}/v{{ $.Params.blyg_version }}.json">
+  {{- else }}
+<link rel="alternate" type="application/json" href="{{ $origin }}items/{{ . }}.json">
+  {{- end }}
+{{- end }}
+{{- if not .Params.blyg_page }}
+  {{- with site.Data.blyg }}{{ with .blogroll }}{{ with .feeds }}
+<link rel="blogroll" type="text/x-opml" href="{{ $origin }}blogroll.opml">
+  {{- end }}{{ end }}{{ end }}
+{{- end }}
+{{- end }}

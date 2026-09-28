@@ -15,7 +15,8 @@ Usage:
     blyg_stamp.py --dry-run       print planned changes, write nothing
     blyg_stamp.py --check         exit nonzero if stamping would change anything
     blyg_stamp.py pin <id>        promote the built items/{id}.json to a
-                                   permanent pinned static file (§8)
+                                   permanent pinned static file (§8); the
+                                   next build publishes its page (§8.4)
 """
 
 from __future__ import annotations
@@ -60,6 +61,26 @@ DIRECTIVE_RE = re.compile(r"^\s*!\[\[(" + BLYG_ID_RE_SRC + r")(@v[0-9]+)?\]\]\s*
 # A fence line: the fence and whatever follows it (an opener's info
 # string). find_directives applies the rest of CommonMark's rule.
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+# §5.7: a machine-generated span is marked in the source with the module's
+# paired shortcode, which renders it as the blyg-tk-gen wrapper:
+#
+#     {{< blyg-gen sources="id, id@vN" model="…" at="…" >}}…{{< /blyg-gen >}}
+#
+# The markers are authoring state, and content_md carries none (§5.7), so
+# content_md is the body with them stripped (strip_gen_markers) and that is
+# what gets hashed. partials/blyg/content-md.html strips them identically
+# -- which is why these use [ \t] rather than \s: Python's \s is Unicode-
+# wide, RE2's isn't.
+GEN_OPEN_RE = re.compile(r'\{\{<[ \t]*blyg-gen((?:[ \t]+[a-z]+="[^"]*")*)[ \t]*>\}\}')
+GEN_CLOSE_RE = re.compile(r"\{\{<[ \t]*/blyg-gen[ \t]*>\}\}")
+# Anything Hugo would read as a blyg-gen shortcode, well-formed or not;
+# `{{</* blyg-gen */>}}` is Hugo's escaped, literal form and doesn't match.
+GEN_ANY_RE = re.compile(r"\{\{[<%][ \t]*/?[ \t]*blyg-gen\b")
+GEN_PARAM_RE = re.compile(r'([a-z]+)="([^"]*)"')
+GEN_PARAMS = ("sources", "model", "at")
+GEN_SOURCE_RE = re.compile(r"^(" + BLYG_ID_RE_SRC + r")(?:@v([1-9][0-9]*))?$")
+ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 
 
 class BlygStampError(Exception):
@@ -111,6 +132,191 @@ def content_hash(body: str) -> str:
 
 
 EMPTY_CONTENT_HASH = content_hash("")
+
+
+def strip_gen_markers(body: str) -> str:
+    """content_md from a source body: a line that is nothing but one
+    blyg-gen marker (a block span's) goes entirely, and a marker inside a
+    line (an inline span's) goes on its own. partials/blyg/content-md.html
+    is the same rule, line for line, in the template."""
+    out = []
+    for line in body.split("\n"):
+        alone = line.strip(" \t")
+        if GEN_OPEN_RE.fullmatch(alone) or GEN_CLOSE_RE.fullmatch(alone):
+            continue
+        out.append(GEN_CLOSE_RE.sub("", GEN_OPEN_RE.sub("", line)))
+    return "\n".join(out)
+
+
+@dataclass
+class GenSpan:
+    """One blyg-gen span as authored: where it is, and its parameters."""
+    line: int
+    end: int  # the closing marker's line
+    block: bool
+    params: dict
+
+
+def parse_gen_params(path: Path, lineno: int, raw: str) -> dict:
+    params = {}
+    for name, value in GEN_PARAM_RE.findall(raw):
+        if name not in GEN_PARAMS:
+            raise BlygStampError(
+                f"{path}: body line {lineno}: blyg-gen takes only "
+                f"{', '.join(GEN_PARAMS)}, not {name!r} -- the generated array "
+                f"MUST NOT carry instruction text or any other authoring state (§5.7)")
+        if name in params:
+            raise BlygStampError(f"{path}: body line {lineno}: blyg-gen repeats {name!r}")
+        params[name] = value
+    if "at" in params and not ISO_Z_RE.match(params["at"]):
+        raise BlygStampError(
+            f"{path}: body line {lineno}: blyg-gen at={params['at']!r} isn't ISO 8601 "
+            f"UTC (e.g. 2026-09-01T12:00:00Z) (§4)")
+    if "model" in params and not params["model"].strip():
+        raise BlygStampError(f"{path}: body line {lineno}: blyg-gen model is empty")
+    for source in parse_gen_sources(params.get("sources", "")):
+        if not GEN_SOURCE_RE.match(source):
+            raise BlygStampError(
+                f"{path}: body line {lineno}: blyg-gen source {source!r} isn't an "
+                f"item id, or id@vN")
+    return params
+
+
+def parse_gen_sources(value: str) -> list[str]:
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+
+def parse_gen(path: Path, body: str) -> list[GenSpan]:
+    """Every blyg-gen span in `body`, in document order, refusing anything
+    whose stripped content_md wouldn't read as the rendered HTML does:
+
+    - a block span has each marker alone on its line, with a blank line (or
+      the start/end of the body) before the opening and after the closing
+      one, so stripping the markers leaves the span its own paragraphs
+      rather than gluing it to its neighbours;
+    - an inline span opens and closes on one line;
+    - spans don't nest, aren't empty, and hold no transclusion directive
+      (quotation is transclusion's alone, and never generated, §5.7 rule 3).
+
+    Markers count inside code fences too: Hugo expands shortcodes there."""
+    lines = body.split("\n")
+    spans: list[GenSpan] = []
+    block: GenSpan | None = None
+
+    def fail(lineno: int, why: str):
+        raise BlygStampError(f"{path}: body line {lineno}: {why}")
+
+    for lineno, line in enumerate(lines, start=1):
+        found = list(GEN_ANY_RE.finditer(line))
+        if not found:
+            continue
+        markers = []
+        pos = 0
+        for m in found:
+            if m.start() < pos:
+                continue
+            tail = line[m.start():]
+            opened = GEN_OPEN_RE.match(tail)
+            closed = GEN_CLOSE_RE.match(tail)
+            if not (opened or closed):
+                fail(lineno, 'malformed blyg-gen marker -- write {{< blyg-gen name="value" … >}} '
+                             'and {{< /blyg-gen >}} (double-quoted parameters, no {{% %}}, '
+                             'no self-closing form)')
+            match = opened or closed
+            markers.append((opened is not None, match, m.start()))
+            pos = m.start() + match.end()
+        alone = line.strip(" \t")
+        if len(markers) == 1 and markers[0][1].group() == alone:
+            is_open, match, _ = markers[0]
+            if is_open:
+                if block:
+                    fail(lineno, f"blyg-gen spans don't nest (one is open since line {block.line})")
+                if lineno > 1 and lines[lineno - 2].strip():
+                    fail(lineno, "a block blyg-gen span needs a blank line before its opening "
+                                 "marker, or stripping the marker glues it to the paragraph above")
+                block = GenSpan(lineno, 0, True, parse_gen_params(path, lineno, match.group(1)))
+            else:
+                if block is None:
+                    fail(lineno, "{{< /blyg-gen >}} closes nothing")
+                if lineno < len(lines) and lines[lineno].strip():
+                    fail(lineno, "a block blyg-gen span needs a blank line after its closing "
+                                 "marker, or stripping the marker glues it to the paragraph below")
+                if not "".join(lines[block.line:lineno - 1]).strip():
+                    fail(lineno, "empty blyg-gen span")
+                block.end = lineno
+                spans.append(block)
+                block = None
+            continue
+        if block:
+            fail(lineno, f"blyg-gen spans don't nest (one is open since line {block.line})")
+        if [is_open for is_open, _, _ in markers] != [True, False] * (len(markers) // 2) \
+                or len(markers) % 2:
+            fail(lineno, "an inline blyg-gen span opens and closes on the same line; a block "
+                         "one puts each marker alone on its own line")
+        for (_, o, ostart), (_, _, cstart) in zip(markers[::2], markers[1::2]):
+            if not line[ostart + o.end():cstart].strip():
+                fail(lineno, "empty blyg-gen span")
+            spans.append(GenSpan(lineno, lineno, False,
+                                 parse_gen_params(path, lineno, o.group(1))))
+    if block:
+        raise BlygStampError(f"{path}: body line {block.line}: blyg-gen span never closes")
+
+    for lineno, line, _ in find_directives(body):
+        for s in spans:
+            if s.block and s.line < lineno < s.end:
+                fail(lineno, f"{line!r} sits inside the generated span opened on line "
+                             f"{s.line} -- a transclusion is quotation, never generation "
+                             f"(§5.7 rule 3); close the span before it")
+    return spans
+
+
+# resolve_source(target_id, version_or_None, drawing_item_id) -> the exact
+# published version a generated span drew on, or a string saying why not.
+SourceResolver = Callable[[str, "int | None", "str | None"], "int | str"]
+
+
+def resolve_generated(item: "Item", resolve: SourceResolver) -> list[dict]:
+    """§5.7: the version-level provenance for this version's generated
+    spans, in document order -- each span's sources pinned to exact
+    published versions now, at publish time, so nothing a source does
+    later reaches it (the same snapshot rule as transclusion, §10.4). The
+    authored parameters ride along, ledger-private, so an edit to them is
+    seen as a change to the version."""
+    generated = []
+    for span in item.gen:
+        sources = []
+        for source in parse_gen_sources(span.params.get("sources", "")):
+            m = GEN_SOURCE_RE.match(source)
+            target = m.group(1)
+            version = int(m.group(2)) if m.group(2) else None
+            resolved = resolve(target, version, item.blyg_id)
+            if isinstance(resolved, str):
+                raise BlygStampError(
+                    f"{item.path}: body line {span.line}: blyg-gen source {source!r} can't "
+                    f"be resolved: {resolved} -- sources name exact published versions of "
+                    f"this origin's items (§5.7 rule 1)")
+            sources.append({"id": target, "version": resolved})
+        g = {"sources": sources, "authored": dict(span.params)}
+        for key in ("model", "at"):
+            if key in span.params:
+                g[key] = span.params[key]
+        generated.append(g)
+    return generated
+
+
+def set_generated(entry: dict, generated: list[dict]) -> None:
+    """Like set_transclusions: present only while the version has any."""
+    if generated:
+        entry["generated"] = generated
+    else:
+        entry.pop("generated", None)
+
+
+def authored_gen(spans: list) -> tuple[str, ...]:
+    """The authored parameters of each span, comparable across the
+    ledger (dicts from JSON) and a parsed body (GenSpans)."""
+    return tuple(json.dumps(s.params if isinstance(s, GenSpan) else s.get("authored", {}),
+                            sort_keys=True) for s in spans)
 
 
 def find_directives(body: str) -> list[tuple[int, str, bool]]:
@@ -208,7 +414,13 @@ def resolve_directives(item: "Item", resolve: Resolver) -> list[dict]:
     content_html byte for byte (blyg_validate.py checks exactly that
     whenever the fragment still sits at the baked version). Storing it
     here, at publish time, is what keeps later edits to the fragment
-    from reaching an already-published thread (§10.4)."""
+    from reaching an already-published thread (§10.4).
+
+    Strictly, what's stored is the fragment's source body: its
+    content_md plus any blyg-gen markers, since those are what render
+    its generated spans' wrappers (§5.7). content_hash is over the
+    stripped content_md, as the fragment's own is. With no markers the
+    two are the same text."""
     snapshots = []
     for lineno, line, _ in find_directives(item.body):
         target = DIRECTIVE_RE.match(line).group(1)
@@ -218,10 +430,10 @@ def resolve_directives(item: "Item", resolve: Resolver) -> list[dict]:
                 f"{item.path}: body line {lineno}: {line!r} can't be resolved: "
                 f"{resolved} -- every directive MUST resolve to a local, "
                 f"currently-published fragment (§10.2)")
-        version, content_md = resolved
+        version, source = resolved
         snapshots.append({"id": target, "version": version, "line": lineno,
-                          "content_hash": content_hash(content_md),
-                          "content_md": content_md})
+                          "content_hash": content_hash(strip_gen_markers(source)),
+                          "content_md": source})
     return snapshots
 
 
@@ -252,7 +464,7 @@ def check_stored_transclusions(item: "Item", entry: dict) -> None:
             f"{got} but the body's directives are {want} -- the ledger was "
             f"edited by hand; restore it rather than re-resolving silently")
     for s in stored:
-        if s.get("content_hash") != content_hash(s.get("content_md", "")):
+        if s.get("content_hash") != content_hash(strip_gen_markers(s.get("content_md", ""))):
             raise BlygStampError(
                 f"ledger entry {item.blyg_id}: the snapshot of {s.get('id')} "
                 f"v{s.get('version')} doesn't match its content_hash -- a baked "
@@ -289,13 +501,19 @@ class Item:
     path: Path
     rel_path: str
     front_matter: dict
-    body: str
+    body: str  # the source body, exactly Hugo's .RawContent
     blyg_id: str | None
     draft: bool
     withdrawn_flag: bool
     kind: str
     publish_at: datetime.datetime | None
     has_expiry: bool
+    gen: list[GenSpan] = field(default_factory=list)
+
+    @property
+    def content_md(self) -> str:
+        """What goes on the wire and is hashed: the body minus blyg-gen markers."""
+        return strip_gen_markers(self.body)
 
 
 def load_item(path: Path, content_dir: Path) -> Item:
@@ -326,6 +544,7 @@ def load_item(path: Path, content_dir: Path) -> Item:
         kind=kind,
         publish_at=parse_date_utc(str(when)) if when is not None else None,
         has_expiry=any(k in lower for k in ("expirydate", "unpublishdate")),
+        gen=parse_gen(path, body),
     )
 
 
@@ -373,23 +592,29 @@ class Plan:
 UNCHANGED_PLAN_KINDS = ("noop", "draft-skip", "future-skip")
 
 
-def entry_state(entry: dict) -> tuple[str, bool, str]:
-    return (entry["kind"], entry["withdrawn"], entry["last_hash"])
+State = tuple[str, bool, str, tuple[str, ...]]
 
 
-def desired_state(item: Item, entry: dict) -> tuple[str, bool, str]:
+def entry_state(entry: dict) -> State:
+    return (entry["kind"], entry["withdrawn"], entry["last_hash"],
+            authored_gen(entry.get("generated", [])))
+
+
+def desired_state(item: Item, entry: dict) -> State:
     """What the ledger should say for this file. While withdrawn, the
     body and the authored kind are invisible on the wire (the endcap is
-    `kind: "withdrawn"` with empty content, §9), so neither can cause a
-    new version until the item returns."""
+    `kind: "withdrawn"` with empty content and no `generated`, §9), so
+    neither can cause a new version until the item returns. The spans'
+    generation provenance is part of the version: changing only a
+    blyg-gen parameter changes the item document, so it is a new version
+    even though content_md, and so the hash, stays the same."""
     if item.withdrawn_flag:
-        return (entry["kind"], True, EMPTY_CONTENT_HASH)
-    return (item.kind, False, content_hash(item.body))
+        return (entry["kind"], True, EMPTY_CONTENT_HASH, ())
+    return (item.kind, False, content_hash(item.content_md), authored_gen(item.gen))
 
 
-def wire_kind(state: tuple[str, bool, str]) -> str:
-    kind, withdrawn, _ = state
-    return "withdrawn" if withdrawn else kind
+def wire_kind(state: State) -> str:
+    return "withdrawn" if state[1] else state[0]
 
 
 def transition(before_withdrawn: bool, after_withdrawn: bool) -> tuple[str, str | None]:
@@ -413,7 +638,8 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
                   now: datetime.datetime, note: str | None = None,
                   published: dict | None = None,
                   resolve: Resolver | None = None,
-                  stale: StaleCheck | None = None) -> Plan:
+                  stale: StaleCheck | None = None,
+                  resolve_source: SourceResolver | None = None) -> Plan:
     """Plan one file. `published` is the ledger as of the last deploy,
     and is only passed with --amend: when it is, a latest version that
     ledger doesn't contain yet has never been served, so it is rewritten
@@ -429,14 +655,20 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
     of them names a source version this --amend run undid or rewrote,
     in which case the thread's own (necessarily unshipped) version is
     amended to re-resolve. Without --amend that can only mean a
-    hand-edited ledger, and is refused."""
+    hand-edited ledger, and is refused.
+
+    `resolve_source` pins a generated span's sources to exact versions
+    (§5.7); like `resolve`, it's only consulted when a version is created,
+    so an unchanged item keeps the provenance it was published with."""
     warning = None
     if resolve is None:
         resolve = lambda target: "no resolver given"  # noqa: E731
+    if resolve_source is None:
+        resolve_source = lambda target, version, drawing: "no source resolver given"  # noqa: E731
     if not item.withdrawn_flag:
         check_directives(item.path, item.body, item.kind)
-        if item.kind == "fragment" and len(item.body) > FRAGMENT_SOFT_CAP:
-            warning = (f"{item.path.name}: fragment content_md is {len(item.body)} "
+        if item.kind == "fragment" and len(item.content_md) > FRAGMENT_SOFT_CAP:
+            warning = (f"{item.path.name}: fragment content_md is {len(item.content_md)} "
                        f"characters; §5.3 says publishers SHOULD cap fragments "
                        f"at {FRAGMENT_SOFT_CAP}")
 
@@ -461,6 +693,7 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
                 f"but items/{{id}}.json MUST stay 200 forever once published (§4)")
         created = iso8601_utc(item.publish_at)
         snapshots = resolve_directives(item, resolve) if item.kind == "thread" else []
+        generated = resolve_generated(item, resolve_source)
 
         if not write:
             # Ids are 128 random bits from a cryptographically strong
@@ -481,11 +714,12 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
             "created": created,
             "version": 1,
             "kind": item.kind,
-            "last_hash": content_hash(item.body),
+            "last_hash": content_hash(item.content_md),
             "withdrawn": False,
             "changelog": [changelog_entry(1, created, note, item.kind)],
         }
         set_transclusions(entry, snapshots)
+        set_generated(entry, generated)
         return Plan(kind="new", path=item.path, blyg_id=new_id,
                     detail=f"assign id, v1 @ {created}",
                     ledger_entry=entry, write_blyg_id=True, warning=warning,
@@ -552,7 +786,7 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
         return Plan(kind="noop", path=item.path, blyg_id=item.blyg_id,
                     detail=detail, warning=warning, next_entry=entry)
 
-    new_entry["kind"], new_entry["withdrawn"], new_entry["last_hash"] = desired
+    new_entry["kind"], new_entry["withdrawn"], new_entry["last_hash"] = desired[:3]
     at_now = iso8601_utc(now)
 
     pub = None
@@ -578,6 +812,7 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
         # The shipped version's snapshots, not fresh ones: v{n} is what
         # readers already have, down to the baked transclusions.
         set_transclusions(new_entry, copy.deepcopy(pub.get("transclusions", [])))
+        set_generated(new_entry, copy.deepcopy(pub.get("generated", [])))
         verb = "would revert" if not write else "revert"
         return Plan(kind="revert", path=item.path, blyg_id=item.blyg_id,
                     detail=f"{verb} unshipped v{entry['version']} -> shipped v{pub['version']}",
@@ -586,10 +821,14 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
 
     # Anything past a revert is a new (or rewritten) version: a thread
     # re-resolves every directive to the then-latest versions (§10.2),
-    # and an endcap empties them (§9).
+    # and an endcap empties them (§9). Generation provenance likewise: a
+    # new version pins its spans' sources afresh, and an endcap never
+    # carries any (§5.7 rule 4).
     publishing_thread = desired[0] == "thread" and not desired[1]
     set_transclusions(new_entry,
                       resolve_directives(item, resolve) if publishing_thread else [])
+    set_generated(new_entry,
+                  resolve_generated(item, resolve_source) if not desired[1] else [])
 
     if can_amend:
         if pub is None and desired[1]:
@@ -685,6 +924,27 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
         source = after.get(snapshot.get("id")) or ledger.get(snapshot.get("id"))
         return snapshot_staleness(snapshot, source)
 
+    # A generated span drew on content that was already published when it
+    # was generated, so its sources resolve against the ledger as it stood
+    # before this run -- not against versions this same run is creating.
+    before = copy.deepcopy(ledger)
+
+    def resolve_source(target: str, version: int | None, drawing: str | None) -> int | str:
+        entry = before.get(target)
+        if entry is None:
+            return f"{target} isn't a published item on this origin"
+        if version is None:
+            if target == drawing:
+                return f"an item drawing on itself names the version: {target}@vN"
+            if entry["withdrawn"]:
+                return f"{target} is withdrawn now; name the version drawn on, {target}@vN"
+            return entry["version"]
+        if version > entry["version"]:
+            return f"{target} has never published v{version}"
+        if entry["changelog"][version - 1].get("kind") == "withdrawn":
+            return f"{target} v{version} is a withdrawal endcap, with no content to draw on"
+        return version
+
     # Fragments first, so a thread stamped in the same run bakes the
     # version this run gives its sources -- the then-latest (§10.2).
     # Then items only now becoming threads (they were fragments, so a
@@ -700,7 +960,8 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
     for i in order:
         item = items[i]
         plan = plan_for_item(item, ledger, write=write, now=now, note=note,
-                             published=published, resolve=resolve, stale=stale)
+                             published=published, resolve=resolve, stale=stale,
+                             resolve_source=resolve_source)
         by_index[i] = plan
         if plan.blyg_id is not None and plan.next_entry is not None:
             after[plan.blyg_id] = plan.next_entry
@@ -863,6 +1124,9 @@ def build_pin_document(built: dict, changelog_entry: dict) -> dict:
     }
     if "transclusions" in built:
         doc["transclusions"] = built["transclusions"]
+    if "generated" in built:
+        # §5.7 rule 5: a citation includes its provenance.
+        doc["generated"] = built["generated"]
     return doc
 
 
@@ -917,6 +1181,8 @@ def cmd_pin(args: argparse.Namespace) -> int:
 
     changelog_entry["pinned"] = True
     save_ledger(ledger_path, ledger)
+    print("rebuild to publish it; commit both files -- the build fails on a "
+          "recorded pin whose file is missing")
     return 0
 
 

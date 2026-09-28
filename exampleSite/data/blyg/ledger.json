@@ -46,6 +46,7 @@
         "at": "2026-09-01T12:00:00Z",
         "kind": "fragment",
         "note": null,
+        "pinned": true,
         "version": 1
       }
     ],
@@ -53,6 +54,46 @@
     "kind": "fragment",
     "last_hash": "sha256:b0a0c5985b2eff15e6bd84a53c9b2685971f13c79d215c13d92893f75ca6118a",
     "path": "content/blyg/2026-09-01-first-fragment.md",
+    "version": 1,
+    "withdrawn": false
+  },
+  "67441qwwhm6yqxgxx56ssrxhr3": {
+    "changelog": [
+      {
+        "at": "2026-09-04T12:00:00Z",
+        "kind": "fragment",
+        "note": null,
+        "version": 1
+      }
+    ],
+    "created": "2026-09-04T12:00:00Z",
+    "generated": [
+      {
+        "authored": {
+          "model": "example-model-1"
+        },
+        "model": "example-model-1",
+        "sources": []
+      },
+      {
+        "at": "2026-09-04T11:30:00Z",
+        "authored": {
+          "at": "2026-09-04T11:30:00Z",
+          "model": "example-model-1",
+          "sources": "5cx94j6wbmzrdnnjxvs9j1nkba"
+        },
+        "model": "example-model-1",
+        "sources": [
+          {
+            "id": "5cx94j6wbmzrdnnjxvs9j1nkba",
+            "version": 1
+          }
+        ]
+      }
+    ],
+    "kind": "fragment",
+    "last_hash": "sha256:11896c2bd6abccb77ad4c33830844e009e5ee939acfb91aed91295ab40b1d8d9",
+    "path": "content/blyg/2026-09-04-generated-fragment.md",
     "version": 1,
     "withdrawn": false
   }

@@ -1,0 +1,49 @@
+{{- /*
+  The content of each blyg page: what layouts/blyg/page.html and
+  layouts/blyg/section.html put in the site's "main" block, inside the
+  site's own baseof.html. Override it in the site's
+  layouts/partials/blyg/html/main.html to change what the pages say;
+  their chrome is already the site's. Presentation, not protocol, except
+  where §8.4 says otherwise:
+
+  - A version display offers only versions the origin promises forever:
+    the live one and pinned ones (§8.4). So an item page shows its live
+    version and cites its pins, and never lists or links any other.
+  - A pinned page's content is that version's publish-time content_html,
+    straight from the pin file, never re-rendered, and is visibly marked
+    as a frozen snapshot, linking the live page and its v{n}.json twin
+    (§8.4 rules 2-3). Keep all three when overriding this.
+
+  The classes are the module's hooks for the site's stylesheet; nothing
+  here is styled, so the site's own typography applies.
+*/ -}}
+{{- $date := "2 January 2006" -}}
+{{- if eq .page "index" -}}
+<section class="blyg-feed">
+<h1>{{ .title }}</h1>
+{{- range .items }}
+<article class="blyg-item">
+{{ .doc.content_html | safeHTML }}
+<p class="blyg-meta">{{ if .permalink }}<a href="{{ .permalink }}">{{ .doc.kind }}</a>{{ else }}{{ .doc.kind }}{{ end }} · <time datetime="{{ .doc.updated }}">{{ (time.AsTime .doc.updated).Format $date }}</time></p>
+</article>
+{{- else }}
+<p>Nothing published yet.</p>
+{{- end }}
+</section>
+{{- else if eq .page "item" -}}
+<article class="blyg-item">
+{{- if eq .doc.kind "withdrawn" }}
+<p>This item was withdrawn.</p>
+{{- else }}
+{{ .doc.content_html | safeHTML }}
+{{- end }}
+<p class="blyg-meta">v{{ .doc.version }}
+{{- with .pins }} · pinned: {{ range $i, $p := . }}{{ if $i }}, {{ end }}<a href="{{ $p.page }}">v{{ $p.version }}</a>{{ end }}{{ end }}
+ · <time datetime="{{ .doc.updated }}">{{ (time.AsTime .doc.updated).Format $date }}</time></p>
+</article>
+{{- else if eq .page "pin" -}}
+<p class="blyg-frozen">Pinned snapshot: version {{ .pin.version }} of this {{ .pin.kind }}, frozen as published
+<time datetime="{{ .pin.at }}">{{ (time.AsTime .pin.at).Format $date }}</time>{{ with .pin.note }} ({{ . }}){{ end }}.
+<a href="{{ .live }}">Current version</a> · <a href="{{ .pin.json }}">v{{ .pin.version }}.json</a></p>
+<article class="blyg-item">{{ .pin.content_html | safeHTML }}</article>
+{{- end -}}
