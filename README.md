@@ -518,6 +518,17 @@ its layouts supply only the `main` block:
 | `f/{id}/`, `t/{id}/` | an item's live permalink: a fragment's under `f/`, a thread's under `t/` (§8.4's paths) | the content adapter (`content/blyg/_content.gotmpl`) |
 | `f/{id}/v{n}/`, `t/{id}/v{n}/` | a pinned version (§8.4), only while version *n* is pinned | the content adapter |
 
+> **Upgrading an existing site:** if `/blyg/` 404s after bumping to this
+> version while the item pages (`/blyg/f/…`, `/blyg/t/…`) work, check
+> `content/blyg/_index.md`'s `outputs`: it needs `"html"` added (setup
+> step 3), so `["blygmanifest", "blygfeed"]` becomes
+> `["html", "blygmanifest", "blygfeed"]`. Unlike this module's other
+> misconfigurations, which fail the build, a missing `"html"` output
+> fails silently: Hugo just renders no page for the section, and
+> `hugo server` shows its ordinary "page not found". The first thing that
+> says why is `blyg_validate.py`, which, run after a build, reports
+> "item pages are built, but the feed page isn't".
+
 The content adapter is a Hugo content adapter the module mounts into the
 site's `content/blyg/`. It adds one page per ledger entry and one per
 pin, built but never listed, so they stay out of `.Pages`, the site's
