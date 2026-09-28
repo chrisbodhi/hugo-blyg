@@ -581,6 +581,14 @@ class TransclusionDirectiveTests(StampHelpers):
         with self.assertRaises(bs.BlygStampError):
             self.stamp()
 
+    def test_non_ascii_whitespace_around_a_directive_is_refused(self):
+        # DIRECTIVE_RE's \s matches U+00A0, which neither Markdown nor
+        # item.html strips: refused here rather than failing the build.
+        write_post(self.content_dir, "t.md", FM, f"![[{self.ID}]]\u00a0\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "U\\+00A0"):
+            self.stamp()
+        self.assertFalse(self.ledger_path.exists())
+
     def test_withdrawn_items_are_not_scanned(self):
         blyg_id = self.first()
         self.edit("post.md", "draft = false", "draft = false\nblyg_withdrawn = true")
@@ -588,6 +596,275 @@ class TransclusionDirectiveTests(StampHelpers):
         self.assertEqual(self.stamp()[0].kind, "withdraw")
         self.assertTrue(self.ledger()[blyg_id]["withdrawn"])
 
+
+class TransclusionResolutionTests(StampHelpers):
+    """§10.2 resolution at publish time, and §10.4: no cascade."""
+
+    FRAG = FM + 'blyg_kind = "fragment"\n'
+
+    def setUp(self):
+        super().setUp()
+        # "z" sorts after the threads below, so every test also proves that
+        # fragments are planned first regardless of file order.
+        self.frag = self.first("z-frag.md", fm=self.FRAG, body="Quoted.\n")
+
+    def thread(self, name="a-thread.md", *targets, extra=""):
+        body = "Intro.\n\n" + "".join(f"![[{t}]]\n" for t in targets) + extra
+        write_post(self.content_dir, name, FM, body)
+
+    def test_directive_bakes_the_fragments_latest_version(self):
+        self.thread("a-thread.md", self.frag)
+        plans = self.stamp()
+        self.assertEqual([p.path.name for p in plans], ["a-thread.md", "z-frag.md"])
+        entry = self.ledger()[plans[0].blyg_id]
+        self.assertEqual(entry["transclusions"], [{
+            "id": self.frag, "version": 1, "line": 3,
+            "content_hash": bs.content_hash("Quoted.\n"), "content_md": "Quoted.\n"}])
+
+    def test_same_run_edit_bakes_the_then_latest_version(self):
+        self.edit("z-frag.md", "Quoted.", "Quoted, v2.")
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        [t] = self.ledger()[thread_id]["transclusions"]
+        self.assertEqual((t["version"], t["content_md"]), (2, "Quoted, v2.\n"))
+
+    def test_directive_order_and_repeats_are_kept(self):
+        other = self.first("y-frag.md", fm=self.FRAG, body="Other.\n")
+        self.thread("a-thread.md", self.frag, other, self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        got = [(t["id"], t["line"]) for t in self.ledger()[thread_id]["transclusions"]]
+        self.assertEqual(got, [(self.frag, 3), (other, 4), (self.frag, 5)])
+
+    def test_editing_the_fragment_leaves_the_thread_alone(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        before = self.ledger()[thread_id]
+        self.edit("z-frag.md", "Quoted.", "Rewritten.")
+        plans = {p.path.name: p.kind for p in self.stamp()}
+        self.assertEqual(plans, {"a-thread.md": "noop", "z-frag.md": "bump"})
+        self.assertEqual(self.ledger()[thread_id], before)
+
+    def test_withdrawing_the_fragment_leaves_the_thread_alone(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        before = self.ledger()[thread_id]
+        self.edit("z-frag.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        self.stamp()
+        self.assertEqual(self.ledger()[thread_id], before)
+
+    def test_republishing_re_resolves(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        self.edit("z-frag.md", "Quoted.", "Rewritten.")
+        self.stamp()
+        self.edit("a-thread.md", "Intro.", "Intro, edited.")
+        self.stamp()
+        [t] = self.ledger()[thread_id]["transclusions"]
+        self.assertEqual((t["version"], t["content_md"]), (2, "Rewritten.\n"))
+
+    def test_republishing_against_a_withdrawn_fragment_is_refused(self):
+        self.thread("a-thread.md", self.frag)
+        self.stamp()
+        self.edit("z-frag.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        self.stamp()
+        self.edit("a-thread.md", "Intro.", "Intro, edited.")
+        with self.assertRaisesRegex(bs.BlygStampError, "is withdrawn"):
+            self.stamp()
+
+    def test_unknown_target_is_refused(self):
+        self.thread("a-thread.md", "7c9wk2mhq0v3xj8tn5rzfd41bg")
+        with self.assertRaisesRegex(bs.BlygStampError, "unknown id or draft"):
+            self.stamp()
+
+    def test_thread_target_is_refused(self):
+        other = self.first("b-thread.md")
+        self.thread("a-thread.md", other)
+        with self.assertRaisesRegex(bs.BlygStampError, "is a thread"):
+            self.stamp()
+
+    def test_a_thread_can_not_transclude_itself(self):
+        thread_id = self.first("a-thread.md")
+        self.edit("a-thread.md", "Body.", f"![[{thread_id}]]")
+        with self.assertRaisesRegex(bs.BlygStampError, "is a thread"):
+            self.stamp()
+
+    def test_directive_in_a_fragment_is_refused(self):
+        write_post(self.content_dir, "b-frag.md", self.FRAG, f"![[{self.frag}]]\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "only threads transclude"):
+            self.stamp()
+
+    def test_fenced_directive_stays_inert(self):
+        self.thread("a-thread.md", extra=f"```\n![[{self.frag}]]\n```\n")
+        thread_id = self.stamp()[0].blyg_id
+        self.assertNotIn("transclusions", self.ledger()[thread_id])
+
+    def test_withdrawing_the_thread_empties_its_transclusions(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        self.edit("a-thread.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        self.stamp()
+        self.assertNotIn("transclusions", self.ledger()[thread_id])
+
+    def test_kind_change_to_fragment_drops_transclusions(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        self.edit("a-thread.md", "draft = false", 'draft = false\nblyg_kind = "fragment"')
+        self.edit("a-thread.md", f"![[{self.frag}]]\n", "")
+        self.stamp()
+        self.assertNotIn("transclusions", self.ledger()[thread_id])
+
+    def test_check_resolves_without_writing(self):
+        self.thread("a-thread.md", self.frag)
+        before = self.ledger()
+        plans = bs.run_stamp(self.content_dir, self.ledger_path, write=False)
+        self.assertEqual(plans[0].kind, "new")
+        self.assertEqual(self.ledger(), before)
+        self.thread("a-thread.md", "7c9wk2mhq0v3xj8tn5rzfd41bg")
+        with self.assertRaises(bs.BlygStampError):
+            bs.run_stamp(self.content_dir, self.ledger_path, write=False)
+
+    def test_hand_edited_snapshot_is_refused(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        ledger = self.ledger()
+        ledger[thread_id]["transclusions"][0]["content_md"] = "Forged.\n"
+        bs.save_ledger(self.ledger_path, ledger)
+        with self.assertRaisesRegex(bs.BlygStampError, "content_hash"):
+            self.stamp()
+
+    def test_snapshot_not_matching_the_body_is_refused(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        ledger = self.ledger()
+        ledger[thread_id]["transclusions"][0]["line"] = 1
+        bs.save_ledger(self.ledger_path, ledger)
+        with self.assertRaisesRegex(bs.BlygStampError, "edited by hand"):
+            self.stamp()
+
+    def test_amend_revert_restores_the_shipped_snapshots(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        shipped = self.ledger()
+        self.edit("a-thread.md", "Intro.", "Oops.")
+        self.stamp(published=shipped)
+        # The source moves on and is withdrawn; undoing the thread edit
+        # still goes back to exactly what shipped, snapshot included.
+        self.edit("z-frag.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        self.edit("a-thread.md", "Oops.", "Intro.")
+        plans = {p.path.name: p.kind for p in self.stamp(published=shipped)}
+        self.assertEqual(plans["a-thread.md"], "revert")
+        self.assertEqual(self.ledger()[thread_id], shipped[thread_id])
+
+    def test_amend_re_resolves_an_unshipped_version(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        shipped = self.ledger()
+        self.edit("a-thread.md", "Intro.", "Edit one.")
+        self.stamp(published=shipped)
+        self.edit("z-frag.md", "Quoted.", "Rewritten.")
+        self.edit("a-thread.md", "Edit one.", "Edit two.")
+        self.stamp(published=shipped)
+        entry = self.ledger()[thread_id]
+        self.assertEqual(entry["version"], 2)
+        self.assertEqual(entry["transclusions"][0]["content_md"], "Rewritten.\n")
+
+    # --amend on a *source*: a version the thread baked but that never
+    # shipped can be undone or rewritten, and the thread (unchanged
+    # itself) has to follow, or its provenance names a version that no
+    # longer exists or holds other content (§10.3).
+
+    def _thread_bakes_unshipped_v2(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        shipped = self.ledger()
+        self.edit("z-frag.md", "Quoted.", "Draft.")
+        self.edit("a-thread.md", "Intro.", "Edited.")
+        self.stamp(published=shipped)
+        [t] = self.ledger()[thread_id]["transclusions"]
+        self.assertEqual((t["version"], t["content_md"]), (2, "Draft.\n"))
+        return thread_id, shipped
+
+    def test_amend_revert_of_a_source_re_resolves_the_thread(self):
+        thread_id, shipped = self._thread_bakes_unshipped_v2()
+        self.edit("z-frag.md", "Draft.", "Quoted.")
+        plans = {p.path.name: p for p in self.stamp(published=shipped)}
+        self.assertEqual(plans["z-frag.md"].kind, "revert")
+        self.assertEqual(plans["a-thread.md"].kind, "amend")
+        self.assertIn("was undone", plans["a-thread.md"].detail)
+        entry = self.ledger()[thread_id]
+        self.assertEqual(entry["version"], 2)
+        [t] = entry["transclusions"]
+        self.assertEqual((t["version"], t["content_md"]), (1, "Quoted.\n"))
+
+    def test_amend_rewrite_of_a_source_re_resolves_the_thread(self):
+        thread_id, shipped = self._thread_bakes_unshipped_v2()
+        self.edit("z-frag.md", "Draft.", "Final.")
+        plans = {p.path.name: p for p in self.stamp(published=shipped)}
+        self.assertEqual(plans["z-frag.md"].kind, "amend")
+        self.assertEqual(plans["a-thread.md"].kind, "amend")
+        self.assertIn("rewritten in place", plans["a-thread.md"].detail)
+        [t] = self.ledger()[thread_id]["transclusions"]
+        self.assertEqual((t["version"], t["content_md"]), (2, "Final.\n"))
+        # Settled: another run changes nothing.
+        kinds = {p.kind for p in self.stamp(published=shipped)}
+        self.assertEqual(kinds, {"noop"})
+
+    def test_amend_re_resolves_a_never_shipped_thread_too(self):
+        shipped = self.ledger()  # the fragment's v1 only
+        self.edit("z-frag.md", "Quoted.", "Draft.")
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp(published=shipped)[0].blyg_id
+        self.edit("z-frag.md", "Draft.", "Quoted.")
+        plans = {p.path.name: p.kind for p in self.stamp(published=shipped)}
+        self.assertEqual(plans["a-thread.md"], "amend")
+        entry = self.ledger()[thread_id]
+        self.assertEqual(entry["version"], 1)
+        self.assertEqual(entry["transclusions"][0]["version"], 1)
+
+    def test_amend_withdrawing_a_baked_unshipped_source_is_refused(self):
+        # The unshipped v2 the thread baked is rewritten into an endcap, so
+        # re-resolving the thread hits a withdrawn source (§10.2).
+        _, shipped = self._thread_bakes_unshipped_v2()
+        self.edit("z-frag.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        with self.assertRaisesRegex(bs.BlygStampError, "is withdrawn"):
+            self.stamp(published=shipped)
+
+    def test_withdrawing_a_source_whose_baked_version_shipped_is_fine(self):
+        thread_id, _ = self._thread_bakes_unshipped_v2()
+        shipped = self.ledger()  # now v2 ships, snapshot and all
+        self.edit("z-frag.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        plans = {p.path.name: p.kind for p in self.stamp(published=shipped)}
+        self.assertEqual(plans, {"z-frag.md": "withdraw", "a-thread.md": "noop"})
+        self.assertEqual(self.ledger()[thread_id], shipped[thread_id])
+
+    def test_amend_elsewhere_leaves_a_thread_baking_shipped_versions_alone(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        shipped = self.ledger()
+        self.edit("z-frag.md", "Quoted.", "Draft.")
+        self.stamp(published=shipped)
+        self.edit("z-frag.md", "Draft.", "Final.")
+        plans = {p.path.name: p.kind for p in self.stamp(published=shipped)}
+        self.assertEqual(plans["a-thread.md"], "noop")
+        self.assertEqual(self.ledger()[thread_id], shipped[thread_id])
+
+    def test_stale_snapshot_without_amend_is_refused(self):
+        self.thread("a-thread.md", self.frag)
+        thread_id = self.stamp()[0].blyg_id
+        ledger = self.ledger()
+        ledger[thread_id]["transclusions"][0]["version"] = 2
+        bs.save_ledger(self.ledger_path, ledger)
+        with self.assertRaisesRegex(bs.BlygStampError, "was undone"):
+            self.stamp()
+
+    def test_dry_run_reports_the_re_resolution_without_writing(self):
+        thread_id, shipped = self._thread_bakes_unshipped_v2()
+        self.edit("z-frag.md", "Draft.", "Quoted.")
+        before = self.ledger()
+        plans = {p.path.name: p for p in bs.run_stamp(
+            self.content_dir, self.ledger_path, write=False, published=shipped)}
+        self.assertEqual(plans["a-thread.md"].kind, "amend")
+        self.assertEqual(self.ledger(), before)
 
 class KindTests(StampHelpers):
     def test_kind_is_recorded(self):

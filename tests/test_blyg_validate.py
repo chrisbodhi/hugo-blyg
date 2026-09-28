@@ -198,5 +198,98 @@ class SurfaceTests(unittest.TestCase):
         self.assertTrue(any("pin" in p for p in self.problems()))
 
 
+FRAG = "5cx94j6wbmzrdnnjxvs9j1nkba"
+
+
+class TransclusionSurfaceTests(SurfaceTests):
+    """A thread baking fragment FRAG v1, as the templates build it (§10.2)."""
+
+    FRAG_HTML = "<p>Quoted.</p>\n"
+
+    def setUp(self):
+        super().setUp()
+        body = f"Intro.\n\n![[{FRAG}]]\n"
+        baked = bv.wrapper(FRAG, 1, self.FRAG_HTML)
+        self.docs[ID] = item_doc(ID, body=body, html=f"<p>Intro.</p>\n{baked}")
+        self.docs[ID]["transclusions"] = [{"id": FRAG, "version": 1}]
+        self.ledger[ID]["last_hash"] = bs.content_hash(body)
+        self.ledger[ID]["transclusions"] = [{
+            "id": FRAG, "version": 1, "line": 3,
+            "content_hash": bs.content_hash("Quoted.\n"), "content_md": "Quoted.\n"}]
+        self.docs[FRAG] = item_doc(FRAG, kind="fragment", body="Quoted.\n", html=self.FRAG_HTML)
+        self.ledger[FRAG] = {
+            "path": "content/blyg/f.md", "created": "2026-01-01T00:00:00Z", "version": 1,
+            "kind": "fragment", "withdrawn": False, "last_hash": bs.content_hash("Quoted.\n"),
+            "changelog": [{"version": 1, "at": "2026-01-01T00:00:00Z", "note": None,
+                           "kind": "fragment"}]}
+
+    def test_valid_thread_passes(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_provenance_must_match_the_ledger(self):
+        self.docs[ID]["transclusions"] = [{"id": FRAG, "version": 2}]
+        self.assertTrue(any("baked" in p for p in self.problems()))
+
+    def test_provenance_carries_only_id_and_version(self):
+        self.docs[ID]["transclusions"][0]["content_md"] = "Quoted.\n"
+        self.assertTrue(any("(§10.3)" in p for p in self.problems()))
+
+    def test_directive_without_a_wrapper_fails(self):
+        self.docs[ID]["content_html"] = f"<p>Intro.</p>\n<p>![[{FRAG}]]</p>"
+        self.assertTrue(any("content_html bakes []" in p for p in self.problems()))
+
+    def test_wrapper_with_the_wrong_version_fails(self):
+        self.docs[ID]["content_html"] = "<p>Intro.</p>\n" + bv.wrapper(FRAG, 2, self.FRAG_HTML)
+        self.assertTrue(any("content_html bakes" in p for p in self.problems()))
+
+    def test_snapshot_must_equal_the_fragments_html_at_that_version(self):
+        self.docs[ID]["content_html"] = "<p>Intro.</p>\n" + bv.wrapper(FRAG, 1, "<p>Drift.</p>\n")
+        self.assertTrue(any("byte-identical" in p for p in self.problems()))
+
+    def test_a_fragment_that_moved_on_is_not_compared(self):
+        # §10.4: the thread keeps v1 while the fragment serves v2.
+        self.ledger[FRAG]["version"] = 2
+        self.ledger[FRAG]["last_hash"] = bs.content_hash("New.\n")
+        self.ledger[FRAG]["changelog"].append(
+            {"version": 2, "at": "2026-01-02T00:00:00Z", "note": None, "kind": "fragment"})
+        self.docs[FRAG] = item_doc(FRAG, kind="fragment", version=2, body="New.\n",
+                                   html="<p>New.</p>\n")
+        self.feed_items = [self.feed_item(FRAG, 2, self.docs[FRAG]),
+                           self.feed_item(ID, 1, self.docs[ID]),
+                           self.feed_item(FRAG, 1, self.docs[FRAG])]
+        self.assertEqual(self.problems(), [])
+
+    def test_provenance_naming_a_never_published_version_fails(self):
+        # What an --amend revert of the source left behind before
+        # blyg_stamp.py learned to re-resolve: FRAG is at v1, the thread
+        # names v2 -- consistently everywhere, so only the changelog tells.
+        self.ledger[ID]["transclusions"][0]["version"] = 2
+        self.docs[ID]["transclusions"] = [{"id": FRAG, "version": 2}]
+        self.docs[ID]["content_html"] = "<p>Intro.</p>\n" + bv.wrapper(FRAG, 2, self.FRAG_HTML)
+        self.assertTrue(any(f"{FRAG} v2, a version {FRAG} has never published" in p
+                            for p in self.problems()))
+
+    def test_provenance_naming_a_non_fragment_version_fails(self):
+        self.ledger[FRAG]["changelog"][0]["kind"] = "thread"
+        self.assertTrue(any("not a fragment" in p for p in self.problems()))
+
+    def test_withdrawn_thread_carries_empty_transclusions(self):
+        self.ledger[ID].update(version=2, withdrawn=True, last_hash=bs.EMPTY_CONTENT_HASH)
+        self.ledger[ID]["changelog"].append(
+            {"version": 2, "at": "2026-01-02T00:00:00Z", "note": "withdrawn", "kind": "withdrawn"})
+        self.ledger[ID].pop("transclusions")
+        self.docs[ID] = item_doc(ID, version=2, withdrawn=True)
+        self.docs[ID]["changelog"][1]["note"] = "withdrawn"
+        self.feed_items = [self.feed_item(ID, 2, self.docs[ID], title="withdrawn", description=""),
+                           self.feed_item(FRAG, 1, self.docs[FRAG])]
+        self.assertEqual(self.problems(), [])
+
+    def test_directive_in_a_fragment_fails(self):
+        body = f"![[{ID}]]\n"
+        self.docs[FRAG] = item_doc(FRAG, kind="fragment", body=body, html=f"<p>![[{ID}]]</p>")
+        self.ledger[FRAG]["last_hash"] = bs.content_hash(body)
+        self.assertTrue(any("only threads transclude" in p for p in self.problems()))
+
+
 if __name__ == "__main__":
     unittest.main()
