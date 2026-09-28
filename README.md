@@ -386,7 +386,10 @@ Something worth quoting:
 ![[5cx94j6wbmzrdnnjxvs9j1nkba]]
 ```
 
-The same text inline, or inside a fenced code block, is inert. Only
+The same text inline, or inside a fenced code block, is inert. The
+whitespace around a directive must be spaces and tabs: anything else
+(a non-breaking space, say) is refused at stamp time, since Markdown
+wouldn't read the line as a block of its own. Only
 threads transclude, only same-origin fragments can be transcluded (0.2 is
 local-only), and the reserved `![[id@vN]]` form is refused.
 
@@ -414,6 +417,12 @@ pinning of the fragment leave it alone until the thread itself is
 republished, which re-resolves every directive to the then-latest
 versions. A withdrawn thread's snapshots are dropped (§9), and
 `--amend` reverting a thread restores exactly the snapshots that shipped.
+The one exception to "never re-resolved": if `--amend` undoes or rewrites
+an unshipped fragment version that a thread baked, the thread's own
+unshipped version is amended in the same run to re-resolve, since its
+provenance would otherwise name a version that no longer exists, or
+exists with other content (§10.3). `blyg_validate.py` backs that up by
+checking every baked `{id, version}` against the fragment's changelog.
 
 `item.html` bakes each snapshot where its directive line was, as
 `<blockquote class="blyg-transclusion" data-blyg-id="…"

@@ -273,8 +273,15 @@ def wrapper(blyg_id: str, version: int, fragment_html: str) -> str:
             f'data-blyg-version="{version}">{fragment_html}</blockquote>')
 
 
-def check_snapshots(public_blyg: Path, docs: dict, problems: Problems) -> None:
-    """§10.2: a baked snapshot is the fragment's rendered HTML at the baked
+def check_snapshots(public_blyg: Path, ledger: dict, docs: dict, problems: Problems) -> None:
+    """§10.3: provenance names "the exact versions baked", so each one must
+    be a version its source actually published as a fragment -- the
+    ledger's changelog records every version's kind. (An --amend that
+    undid or rewrote an unshipped source version is what could break
+    that; blyg_stamp.py re-resolves such threads, and this is the check
+    behind it.)
+
+    §10.2: a baked snapshot is the fragment's rendered HTML at the baked
     version. The template renders it from the ledger's stored content_md
     rather than copying bytes, so wherever that version's content_html is
     still on the wire -- the fragment's live document, or a pin -- the
@@ -285,6 +292,18 @@ def check_snapshots(public_blyg: Path, docs: dict, problems: Problems) -> None:
             continue
         for t in doc.get("transclusions") or []:
             fid, version = t.get("id"), t.get("version")
+            published = {c.get("version"): c.get("kind")
+                         for c in (ledger.get(fid) or {}).get("changelog", [])}
+            if version not in published:
+                problems.add(f"items/{thread_id}.json",
+                             f"transcludes {fid} v{version}, a version {fid} has never "
+                             f"published (§10.3)")
+                continue
+            if published[version] != "fragment":
+                problems.add(f"items/{thread_id}.json",
+                             f"transcludes {fid} v{version}, which was published as "
+                             f"{published[version]!r}, not a fragment (§10.2)")
+                continue
             source = docs.get(fid)
             reference = None
             if source and source.get("kind") == "fragment" and source.get("version") == version:
@@ -485,7 +504,7 @@ def validate(public_dir: Path, ledger_path: Path) -> Problems:
     if docs and manifest.get("updated") != max(d.get("updated", "") for d in docs.values()):
         problems.add("blyg.json", "updated != newest item's updated")
 
-    check_snapshots(public_blyg, docs, problems)
+    check_snapshots(public_blyg, ledger, docs, problems)
     check_index(public_blyg, ledger, docs, problems)
     check_pins(public_blyg, ledger, origin, problems)
     check_feed(public_blyg, ledger, docs, manifest, origin, problems)

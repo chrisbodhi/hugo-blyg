@@ -270,6 +270,8 @@ no-cascade rule against real builds in CI.)*
       text. Fenced code is recognized as inert; a directive-shaped line
       that Markdown reads as an indented code block or raw HTML fails the
       build instead of being baked (fence it to keep it as text).
+      Surrounding whitespace other than spaces and tabs is refused by
+      `blyg_stamp.py`, which the template's placement can't honor.
 - [ ] `![[id@vN]]` is reserved: publishers MUST reject it at publish
       time.
 - [ ] Every directive MUST resolve to a local, currently-published
@@ -284,10 +286,14 @@ no-cascade rule against real builds in CI.)*
       `blyg-transclusion` is a permanent wire token.
 - [ ] `content_md` keeps the directives; republishing re-resolves every
       directive to the then-latest versions. An `--amend` revert to the
-      shipped version restores the shipped snapshots instead.
+      shipped version restores the shipped snapshots instead; an `--amend`
+      that undoes or rewrites an unshipped *source* version a thread baked
+      amends that thread's unshipped version to re-resolve.
 - [ ] Thread item documents carry a top-level `transclusions` array in
       directive order; fragments omit the key entirely; threads always
-      carry it, even as `[]` for a withdrawn thread.
+      carry it, even as `[]` for a withdrawn thread. Each `{id, version}`
+      names a version its source published as a fragment
+      (`blyg_validate.py` checks the ledger's changelog).
 - [ ] Later edits, withdrawal, or pinning of a source fragment do **not**
       change a thread's already-baked snapshot (no cascade): an unchanged
       thread is never re-resolved, and the template bakes only from the
