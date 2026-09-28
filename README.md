@@ -29,9 +29,10 @@ for the scripts.
 ## Setup
 
 Hugo Modules merge an imported module's `content/`, `layouts/`, `data/`,
-`static/`, `archetypes/`, and `i18n/` into the site's own filesystem
-automatically (this module's `content/` holds only the content adapter
-that adds the blyg pages).
+`static/`, `assets/`, `archetypes/`, and `i18n/` into the site's own
+filesystem automatically (this module's `content/` holds only the
+content adapter that adds the blyg pages, and its `assets/` only the
+version stepper's script).
 They do **not** merge a module's own `hugo.toml`/`config.toml` — site-wide
 configuration (`[outputFormats]`, `[mediaTypes]`, `[outputs]`, `[params]`)
 has to be declared by whatever site imports this module (verified
@@ -564,7 +565,15 @@ content is that version's publish-time `content_html` (§8.4 rule 2),
 marked as a frozen snapshot in its text as well as its classes (a banner
 saying "Pinned v2 — a frozen snapshot from …", and "v2 · frozen" on its
 version line), and it links the live page and its `v{n}.json` twin
-(rule 3).
+(rule 3). Built with `hugo --minify`, the page is minified like every
+other page on the site, which changes the bytes' spelling (quotes,
+whitespace) but not one element, attribute or word of the content;
+`blyg_validate.py` compares it that way, and the JSON twin remains the
+byte-exact citation. This is also where the templates read pins back:
+a pin the ledger records whose `static/blyg/items/{id}/v{n}.json` is
+missing, or names another id or version, fails the build, since a pin MUST return 200 forever (§8). The
+module reads pins from the site root's `static/`, which is where
+`blyg_stamp.py pin` writes them by default.
 
 **The version stepper** is the module's one script
 (`assets/blyg/version-nav.js`, published fingerprinted under `/blyg/`),
@@ -580,16 +589,7 @@ reads which versions exist from the version line's `data-*` attributes
 and doesn't run on a pinned page or a withdrawn item. Without it, every
 pin is still a plain link away. The script tag is emitted only on pages
 with something to step; override `partials/blyg/view/script.html` with
-an empty file to ship none. Built with `hugo --minify`, the page is
-minified like every other page on the site, which changes the bytes'
-spelling (quotes, whitespace) but not one element, attribute or word
-of the content; `blyg_validate.py` compares it that way, and the JSON
-twin remains the byte-exact citation. This is also where the templates
-read pins back: a pin the ledger records whose
-`static/blyg/items/{id}/v{n}.json` is missing, or names another id or
-version, fails the build, since a pin MUST return 200 forever (§8). The
-module reads pins from the site root's `static/`, which is where
-`blyg_stamp.py pin` writes them by default.
+an empty file to ship none.
 
 **The `<head>`** is the site's. Two things there are worth adding (setup
 step 5):
@@ -606,9 +606,9 @@ step 5):
 
 **Styling** is the site's too: the module ships no CSS, and the pages
 read in order without any. Their markup uses the blygger reference
-client's class vocabulary ([`docs/css-contract.md`](https://github.com/blygger/blygger-spec/blob/main/docs/css-contract.md)
-in blygger-spec), so a theme written against that contract styles these
-pages as well:
+client's class vocabulary ([`docs/css-contract.md`](https://github.com/blygger/blygger-spec/blob/c5884b9214b6972c3aed2fecf9aae68c9eab5267/docs/css-contract.md)
+in blygger-spec, at the commit `docs/conformance.md` pins), so a theme
+written against that contract styles these pages as well:
 
 | Class | What it marks |
 |---|---|
