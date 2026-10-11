@@ -21,7 +21,8 @@
   blockquote of the author's own before it is kept, as ordinary text.
 */ -}}
 {{- $limit := 300 -}}
-{{- $parts := split . `<blockquote class="blyg-transclusion"` -}}
+{{- /* The prefix both a whole and a partial quote's wrapper start with. */ -}}
+{{- $parts := split . `<blockquote class="blyg-transclusion` -}}
 {{- $html := index $parts 0 -}}
 {{- $cut := gt (len $parts) 1 -}}
 {{- $html = replaceRE `(?is)<(script|style)\b.*?</(script|style)\s*>` " " $html -}}

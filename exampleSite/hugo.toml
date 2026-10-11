@@ -5,7 +5,7 @@ title = "hugo-blyg example"
 disableKinds = ["taxonomy", "term", "RSS", "sitemap", "robotsTXT", "404"]
 
 [params.blyg]
-  level = 1   # optional; 1 is the default and the only level this module builds
+  level = 1   # optional; 1 (the default) or 2, see the README's "Conformance level"
 
 [module]
   [[module.imports]]

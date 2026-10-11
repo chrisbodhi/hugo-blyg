@@ -67,7 +67,7 @@
   */ -}}
   {{- $html := partial "blyg/bake.html" (dict
       "page" $page "raw" $page.RawContent "html" $page.Content
-      "snapshots" $entry.transclusions "hash" $entry.last_hash
+      "snapshots" $entry.transclusions "links" $entry.links "hash" $entry.last_hash
       "file" $file "base" $base "self" $self) -}}
   {{- $contentHTML = $html -}}
 
@@ -194,11 +194,15 @@
   {{- end -}}
 {{- end -}}
 {{- if eq $entry.kind "thread" -}}
-  {{- /* §10.3: {id, version} in directive order; [] for an endcap. */ -}}
+  {{- /* §10.3: {id, version, selector?} in directive order; [] for an endcap. */ -}}
   {{- $provenance := slice -}}
   {{- if not $withdrawn -}}
     {{- range $entry.transclusions -}}
-      {{- $provenance = $provenance | append (dict "id" .id "version" (int .version)) -}}
+      {{- $t := dict "id" .id "version" (int .version) -}}
+      {{- /* A partial transclusion's text-quote selector (§10.3): exact
+             only; prefix and suffix are optional. */ -}}
+      {{- with .selection -}}{{- $t = merge $t (dict "selector" (dict "exact" .)) -}}{{- end -}}
+      {{- $provenance = $provenance | append $t -}}
     {{- end -}}
   {{- end -}}
   {{- $doc = merge $doc (dict "transclusions" $provenance) -}}

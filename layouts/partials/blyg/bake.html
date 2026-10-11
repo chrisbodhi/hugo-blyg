@@ -1,11 +1,12 @@
 {{- /*
   Renders one item version's content_html, baking its transclusions
-  (§10.2) -- the item's own, and recursively a quoted thread's:
+  (§10.2) -- the item's own, and recursively a quoted thread's -- and
+  its plain internal links (§10.1):
 
     {{ $html := partial "blyg/bake.html" (dict
          "page" $page "raw" $page.RawContent "html" $page.Content
-         "snapshots" $entry.transclusions "hash" $entry.last_hash
-         "file" $file "base" $base "self" $self) }}
+         "snapshots" $entry.transclusions "links" $entry.links
+         "hash" $entry.last_hash "file" $file "base" $base "self" $self) }}
 
   Inputs:
     page      -- the Page to render in: the item's own, or a quoted
@@ -18,7 +19,11 @@
     snapshots -- the ledger's snapshots for this version, in directive
                  order: {id, version, line, content_hash, content_md},
                  plus kind "thread" and that version's own snapshots,
-                 nested, for a thread source.
+                 nested, for a thread source; the source version's
+                 links, if it has any; and a partial transclusion's
+                 selection.
+    links     -- the ledger's resolved [[id]] links for this version:
+                 {id, page, text}.
     hash      -- this version's content_hash, salting the placeholders.
     file      -- the item being built, for error messages.
     base      -- the site's base URL, without a trailing slash.
@@ -38,7 +43,10 @@
   context -- the same rendering that produced the source's content_html,
   which scripts/blyg_validate.py checks byte for byte while the source
   still sits at the baked version. A quoted thread's snapshot bakes its
-  own snapshots the same way, so nesting is nested blockquotes. The
+  own snapshots the same way, so nesting is nested blockquotes. A
+  partial transclusion's placeholder takes its attached blockquote's
+  lines too, and bakes as the selection's plain text, once the source's
+  text content is checked to contain it. The
   placeholder is letters and digits only (nothing goldmark or the
   typographer will touch) and salted with this body's hash, so authored
   text can't collide with it.
@@ -46,77 +54,127 @@
 {{- $page := .page -}}
 {{- $file := .file -}}
 {{- $base := .base -}}
+{{- $origin := printf "%s/blyg/" $base -}}
 {{- $snapshots := .snapshots | default slice -}}
+{{- $salt := substr (strings.TrimPrefix "sha256:" .hash) 0 16 -}}
+{{- $lines := split .raw "\n" -}}
+{{- $bakes := slice -}}
+{{- range $i, $s := $snapshots -}}
+  {{- $n := int $s.line -}}
+  {{- if or (lt $n 1) (gt $n (len $lines)) -}}
+    {{- errorf "blyg: %s: the ledger's transclusion of %s names body line %d, which doesn't exist -- rerun scripts/blyg_stamp.py" $file $s.id $n -}}
+  {{- end -}}
+  {{- $line := index $lines (sub $n 1) -}}
+  {{- if ne (trim $line " \t\r") (printf "![[%s]]" $s.id) -}}
+    {{- errorf "blyg: %s body line %d is %q, but the ledger bakes ![[%s]] there -- rerun scripts/blyg_stamp.py" $file $n $line $s.id -}}
+  {{- end -}}
+  {{- /* §10.1: a blockquote attached to the directive (no blank line) is
+         a partial transclusion's selection. Its lines go with the
+         directive; blyg_stamp.py parsed them into the ledger's
+         "selection", which a snapshot stamped before 0.3 doesn't have --
+         baking that as a whole quote would misquote, so it fails. */ -}}
+  {{- $last := $n -}}
+  {{- range after $n $lines -}}
+    {{- if not (hasPrefix (strings.TrimLeft " \t" .) ">") -}}{{- break -}}{{- end -}}
+    {{- $last = add $last 1 -}}
+  {{- end -}}
+  {{- if ne (gt $last $n) (isset $s "selection") -}}
+    {{- errorf "blyg: %s body line %d: ![[%s]] %s -- rerun scripts/blyg_stamp.py (§10.1)" $file $n $s.id (cond (gt $last $n) "has a blockquote attached, a partial transclusion, but the ledger bakes a whole one" "has no blockquote attached, but the ledger bakes a partial one") -}}
+  {{- end -}}
+  {{- if ne (printf "sha256:%s" (crypto.SHA256 (partial "blyg/content-md.html" $s.content_md))) $s.content_hash -}}
+    {{- errorf "blyg: %s: the ledger's snapshot of %s v%v doesn't match its content_hash -- a baked snapshot MUST NOT change without a new thread version (§10.4)" $file $s.id $s.version -}}
+  {{- end -}}
+  {{- $source := false -}}
+  {{- range first 1 (where site.RegularPages "Params.blyg_id" $s.id) -}}{{- $source = . -}}{{- end -}}
+  {{- if not $source -}}
+    {{- errorf "blyg: %s transcludes %s, which has no page on this site" $file $s.id -}}
+  {{- end -}}
+  {{- /* Made absolute in the source's own page context, exactly as the
+         source's own content_html was -- a quoted footnote anchor
+         points at the source's page, not this thread's. */ -}}
+  {{- $sourcePage := partial "blyg/permalink.html" (dict "id" $s.id "kind" (index site.Data.blyg.ledger $s.id).kind "base" $base) -}}
+  {{- $quoted := partial "blyg/bake.html" (dict
+      "page" $source "raw" $s.content_md "snapshots" ($s.transclusions | default slice)
+      "links" ($s.links | default slice)
+      "hash" $s.content_hash "file" $file "base" $base "self" $sourcePage) -}}
+  {{- $wrapped := printf `<blockquote class="blyg-transclusion" data-blyg-id="%s" data-blyg-version="%d">%s</blockquote>`
+        $s.id (int $s.version) $quoted -}}
+  {{- with $s.selection -}}
+    {{- /* §10.2: the selection MUST be a substring of the source's text
+           content at the baked version, or it's a publish error; the
+           bake is the selection's plain text, one <p> per line. */ -}}
+    {{- if not (strings.Contains (partial "blyg/text-content.html" $quoted) .) -}}
+      {{- errorf "blyg: %s body line %d: the selection quoted from %s v%d isn't in its text (§10.2) -- quote it exactly, as it reads on the page: %q" $file $n $s.id (int $s.version) . -}}
+    {{- end -}}
+    {{- $paras := slice -}}
+    {{- range split . "\n" -}}{{- $paras = $paras | append (printf "<p>%s</p>" (htmlEscape .)) -}}{{- end -}}
+    {{- $wrapped = printf `<blockquote class="blyg-transclusion blyg-partial" data-blyg-id="%s" data-blyg-version="%d">%s</blockquote>`
+          $s.id (int $s.version) (delimit $paras "") -}}
+  {{- end -}}
+  {{- $indent := index (findRE `^[ \t]*` $line 1) 0 | default "" -}}
+  {{- $bakes = $bakes | append (dict
+      "token" (printf "blygtransclusion%sn%d" $salt $i) "line" $n "last" $last
+      "indent" $indent "html" $wrapped
+  ) -}}
+{{- end -}}
+
 {{- $html := "" -}}
-{{- if and (not $snapshots) .html -}}
+{{- if and (not $bakes) .html -}}
   {{- $html = printf "%s" .html -}}
-{{- else if not $snapshots -}}
-  {{- $html = printf "%s" ($page.RenderString (dict "display" "block") .raw) -}}
 {{- else -}}
   {{- /* The source's lines -- blyg-gen markers and all -- which is what the
          ledger's line numbers count and what renders the wrappers. */ -}}
-  {{- $lines := split .raw "\n" -}}
-  {{- $salt := substr (strings.TrimPrefix "sha256:" .hash) 0 16 -}}
-  {{- $bakes := slice -}}
-  {{- range $i, $s := $snapshots -}}
-    {{- $n := int $s.line -}}
-    {{- if or (lt $n 1) (gt $n (len $lines)) -}}
-      {{- errorf "blyg: %s: the ledger's transclusion of %s names body line %d, which doesn't exist -- rerun scripts/blyg_stamp.py" $file $s.id $n -}}
-    {{- end -}}
-    {{- $line := index $lines (sub $n 1) -}}
-    {{- if ne (trim $line " \t\r") (printf "![[%s]]" $s.id) -}}
-      {{- errorf "blyg: %s body line %d is %q, but the ledger bakes ![[%s]] there -- rerun scripts/blyg_stamp.py" $file $n $line $s.id -}}
-    {{- end -}}
-    {{- /* §10.1 (0.3): a blockquote attached to the directive makes it a
-           partial transclusion, which this module doesn't build; baking
-           the whole item there would misquote. blyg_stamp.py refuses it
-           first. */ -}}
-    {{- if and (lt $n (len $lines)) (hasPrefix (strings.TrimLeft " \t" (index $lines $n)) ">") -}}
-      {{- errorf "blyg: %s body line %d: ![[%s]] is followed directly by a blockquote, which 0.3 reads as a partial transclusion (§10.1) -- hugo-blyg doesn't build those; put a blank line between them" $file $n $s.id -}}
-    {{- end -}}
-    {{- if ne (printf "sha256:%s" (crypto.SHA256 (partial "blyg/content-md.html" $s.content_md))) $s.content_hash -}}
-      {{- errorf "blyg: %s: the ledger's snapshot of %s v%v doesn't match its content_hash -- a baked snapshot MUST NOT change without a new thread version (§10.4)" $file $s.id $s.version -}}
-    {{- end -}}
-    {{- $source := false -}}
-    {{- range first 1 (where site.RegularPages "Params.blyg_id" $s.id) -}}{{- $source = . -}}{{- end -}}
-    {{- if not $source -}}
-      {{- errorf "blyg: %s transcludes %s, which has no page on this site" $file $s.id -}}
-    {{- end -}}
-    {{- /* Made absolute in the source's own page context, exactly as the
-           source's own content_html was -- a quoted footnote anchor
-           points at the source's page, not this thread's. */ -}}
-    {{- $sourcePage := partial "blyg/permalink.html" (dict "id" $s.id "kind" (index site.Data.blyg.ledger $s.id).kind "base" $base) -}}
-    {{- $quoted := partial "blyg/bake.html" (dict
-        "page" $source "raw" $s.content_md "snapshots" ($s.transclusions | default slice)
-        "hash" $s.content_hash "file" $file "base" $base "self" $sourcePage) -}}
-    {{- $token := printf "blygtransclusion%sn%d" $salt $i -}}
-    {{- $indent := index (findRE `^[ \t]*` $line 1) 0 | default "" -}}
-    {{- $bakes = $bakes | append (dict
-        "token" $token "line" $n "indent" $indent
-        "html" (printf `<blockquote class="blyg-transclusion" data-blyg-id="%s" data-blyg-version="%d">%s</blockquote>`
-                 $s.id (int $s.version) $quoted)
-    ) -}}
-  {{- end -}}
   {{- $out := slice -}}
+  {{- $skipTo := 0 -}}
   {{- range $i, $line := $lines -}}
+    {{- $at := add $i 1 -}}
     {{- $replaced := false -}}
     {{- range $bakes -}}
-      {{- if eq .line (add $i 1) -}}
+      {{- if eq .line $at -}}
         {{- $out = $out | append "" (printf "%s%s" .indent .token) "" -}}
         {{- $replaced = true -}}
+        {{- $skipTo = .last -}}
       {{- end -}}
     {{- end -}}
-    {{- if not $replaced -}}{{- $out = $out | append $line -}}{{- end -}}
+    {{- if and (not $replaced) (gt $at $skipTo) -}}{{- $out = $out | append $line -}}{{- end -}}
   {{- end -}}
   {{- $html = printf "%s" ($page.RenderString (dict "display" "block") (delimit $out "\n")) -}}
-  {{- range $bakes -}}
-    {{- $para := printf "<p>%s</p>" .token -}}
-    {{- if ne (len (findRE $para $html)) 1 -}}
-      {{- errorf "blyg: %s: the transclusion directive on body line %d didn't render as a paragraph of its own (inside an indented code block or raw HTML?), so there's nowhere to bake it" $file .line -}}
-    {{- end -}}
-    {{- $html = replace $html $para .html -}}
+{{- end -}}
+
+{{- /*
+  §10.1: each plain internal link [[id]] outside code becomes an
+  ordinary anchor to the page blyg_stamp.py resolved for it, with the
+  anchor text it recorded. Code spans and blocks are set aside first,
+  where the form is inert text, as is a "!"-prefixed one. A live one the
+  ledger didn't resolve fails the build: shipping the literal text
+  would be wrong.
+*/ -}}
+{{- $codes := findRE `(?s)<pre\b.*?</pre>|<code\b.*?</code>` $html -}}
+{{- range $i, $c := $codes -}}
+  {{- $html = replace $html $c (printf "blygcode%sn%dx" $salt $i) 1 -}}
+{{- end -}}
+{{- range .links -}}
+  {{- $a := printf `<a href="%s%s">%s</a>` $origin .page (htmlEscape .text) -}}
+  {{- $pattern := printf `(^|[^!])\[\[%s\]\]` .id -}}
+  {{- /* Twice: a match consumes the character before it, so a link right
+         after another is only found on the second pass. */ -}}
+  {{- $html = replaceRE $pattern (printf "${1}%s" (replace $a "$" "$$")) $html -}}
+  {{- $html = replaceRE $pattern (printf "${1}%s" (replace $a "$" "$$")) $html -}}
+{{- end -}}
+{{- with findRE `(^|[^!])\[\[[0-9a-hjkmnp-tv-z]{26}\]\]` $html 1 -}}
+  {{- errorf "blyg: %s renders %s, a plain internal link (§10.1) the ledger didn't resolve -- rerun scripts/blyg_stamp.py" $file (index . 0) -}}
+{{- end -}}
+{{- range $i, $c := $codes -}}
+  {{- $html = replace $html (printf "blygcode%sn%dx" $salt $i) $c 1 -}}
+{{- end -}}
+
+{{- range $bakes -}}
+  {{- $para := printf "<p>%s</p>" .token -}}
+  {{- if ne (len (findRE $para $html)) 1 -}}
+    {{- errorf "blyg: %s: the transclusion directive on body line %d didn't render as a paragraph of its own (inside an indented code block or raw HTML?), so there's nowhere to bake it" $file .line -}}
   {{- end -}}
+  {{- $html = replace $html $para .html -}}
 {{- end -}}
 {{- /* content_html is self-contained (§5.2): every URL absolute. Already-
-       absolute bakes pass through untouched. */ -}}
+       absolute bakes and links pass through untouched. */ -}}
 {{- return partial "blyg/absolute-urls.html" (dict "html" $html "base" $base "page" .self) -}}

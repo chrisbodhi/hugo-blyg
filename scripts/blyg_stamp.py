@@ -59,9 +59,9 @@ FRONT_MATTER_OPEN = "+++\n"
 # merely looks similar is inert text.
 DIRECTIVE_RE = re.compile(r"^\s*!\[\[(" + BLYG_ID_RE_SRC + r")(@v[0-9]+)?\]\]\s*$")
 # §10.1 (0.3): the unprefixed inline form `[[` + id + `]]`, anywhere
-# outside code, is a plain internal link. hugo-blyg doesn't render these
-# yet, so blyg_stamp.py refuses them rather than ship the literal text.
-# A `!`-prefixed one is a directive on a line of its own and inert text
+# outside code, is a plain internal link, resolved at publish time like a
+# directive and rendered as an absolute anchor to the target's page. A
+# `!`-prefixed one is a directive on a line of its own and inert text
 # anywhere else, never a link.
 INTERNAL_LINK_RE = re.compile(r"(?<!!)\[\[(" + BLYG_ID_RE_SRC + r")\]\]")
 # An inline code span: a backtick run, then anything up to the next run
@@ -361,31 +361,110 @@ def find_directives(body: str) -> list[tuple[int, str, bool]]:
     return found
 
 
-def unsupported_grammar(body: str) -> list[str]:
-    """0.3 grammar (§10.1) this module doesn't build yet, one message per
-    use: a partial transclusion -- a directive with a blockquote attached,
-    no blank line between -- and a plain internal link `[[id]]` outside
-    code. Both change what 0.2 bytes mean (a whole quote followed by the
-    author's own blockquote; literal text), so shipping either as before
-    would be wrong under 0.3, and they're refused instead."""
-    problems = []
+# §10.2's text content: whitespace collapsed within a block. Spelled out
+# rather than \s, which is Unicode-wide in Python and ASCII in RE2, so
+# blyg_validate.py and partials/blyg/text-content.html agree.
+TEXT_WS_RE = re.compile(r"[ \t\n\r\f\v]+")
+
+
+def selection_text(quoted: list[str]) -> str:
+    """A partial transclusion's selection (§10.1): the attached
+    blockquote's text, each of its paragraphs on one line -- soft-wrapped
+    lines joined, whitespace collapsed -- joined by line breaks, which is
+    how §10.2's text content keeps block boundaries. `quoted` is the
+    blockquote's lines with their `>` (and one space after it) removed.
+    The text is taken literally: Markdown in it isn't rendered, since the
+    bake is plain text (§10.2), so it has to match the source as read."""
+    paragraphs, current = [], []
+    for line in quoted + [""]:
+        if line.strip(" \t"):
+            current.append(line)
+        elif current:
+            paragraphs.append(TEXT_WS_RE.sub(" ", " ".join(current)).strip(" "))
+            current = []
+    return "\n".join(p for p in paragraphs if p)
+
+
+def partial_selection(lines: list[str], lineno: int) -> tuple[str | None, int]:
+    """(selection, last line) for the directive on 1-based `lineno`:
+    (None, lineno) for a whole transclusion, or the attached blockquote's
+    selection and its last line for a partial one (§10.1). Raises
+    ValueError when the blockquote runs on into an unquoted line --
+    Markdown would read that as more of the quote (a lazy continuation),
+    the bake wouldn't -- or quotes nothing."""
+    quoted = []
+    i = lineno  # the 0-based index of the line after the directive
+    while i < len(lines) and lines[i].lstrip(" \t").startswith(">"):
+        text = lines[i].lstrip(" \t")[1:]
+        quoted.append(text[1:] if text[:1] in (" ", "\t") else text)
+        i += 1
+    if not quoted:
+        return None, lineno
+    if i < len(lines) and lines[i].strip(" \t\r"):
+        raise ValueError(
+            f"the quoted selection after it runs on into body line {i + 1}, which "
+            f"Markdown would read as part of the quote -- end the selection with a "
+            f"blank line")
+    selection = selection_text(quoted)
+    if not selection:
+        raise ValueError("the blockquote attached to it quotes nothing")
+    return selection, i
+
+
+def selections(body: str) -> dict[int, tuple[str, int]]:
+    """{directive line: (selection, last line)} for every partial
+    transclusion in `body` -- ValueError as partial_selection."""
     lines = body.split("\n")
-    for lineno, line, _ in find_directives(body):
-        if lineno < len(lines) and lines[lineno].lstrip(" \t").startswith(">"):
-            problems.append(
-                f"body line {lineno}: {line!r} is followed directly by a "
-                f"blockquote, which 0.3 reads as a partial transclusion "
-                f"(§10.1) -- hugo-blyg doesn't build those yet. Put a blank "
-                f"line between them to quote the whole item, followed by "
-                f"your own blockquote.")
+    found = {}
+    for lineno, _, _ in find_directives(body):
+        selection, last = partial_selection(lines, lineno)
+        if selection is not None:
+            found[lineno] = (selection, last)
+    return found
+
+
+def find_links(body: str) -> list[str]:
+    """The ids of every plain internal link `[[id]]` (§10.1) in `body`, in
+    order of first use: outside code spans and fenced code, and outside
+    partial transclusions' selections, which bake as quoted plain text."""
+    quoted = {n for first, (_, last) in selections(body).items()
+              for n in range(first + 1, last + 1)}
+    ids: list[str] = []
     for lineno, line in live_lines(body):
+        if lineno in quoted:
+            continue
         for m in INTERNAL_LINK_RE.finditer(CODE_SPAN_RE.sub("", line)):
-            problems.append(
-                f"body line {lineno}: {m.group(0)!r} is a plain internal link "
-                f"(§10.1, 0.3) -- hugo-blyg doesn't render those yet. Link "
-                f"the item's page with an ordinary markdown link, or put it "
-                f"in backticks or a code fence to keep it as text.")
-    return problems
+            if m.group(1) not in ids:
+                ids.append(m.group(1))
+    return ids
+
+
+LINK_TEXT_CAP = 60
+
+
+def link_text(body: str) -> str:
+    """The anchor text a `[[id]]` link to this body renders with: its
+    first line of prose, Markdown punctuation dropped, cut near 60
+    characters. Presentation (§10.1), but fixed when the link resolves,
+    with the rest of the version, so the linking item's bytes don't move
+    when the target does."""
+    fence = None
+    for line in strip_gen_markers(body).split("\n"):
+        m = FENCE_RE.match(line)
+        if m:
+            fence = None if fence else m.group(1)
+            continue
+        if fence or DIRECTIVE_RE.match(line):
+            continue
+        text = re.sub(r"^\s*(#{1,6}\s+|(>\s*)+|[-*+]\s+|\d+[.)]\s+)", "", line)
+        text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
+        text = re.sub(r"\[\[(" + BLYG_ID_RE_SRC + r")\]\]|[*_`]", "", text)
+        text = TEXT_WS_RE.sub(" ", text).strip()
+        if text:
+            if len(text) > LINK_TEXT_CAP:
+                text = text[:LINK_TEXT_CAP].rsplit(" ", 1)[0].rstrip(" ,.;:") + "\u2026"
+            return text
+    return ""
 
 
 def check_directives(path: Path, body: str, kind: str) -> None:
@@ -416,15 +495,24 @@ def check_directives(path: Path, body: str, kind: str) -> None:
                 f"directive (§10.1), but only threads transclude -- set "
                 f"blyg_kind = \"thread\", or put it inside a code fence to "
                 f"keep it as inert text.")
-    for problem in unsupported_grammar(body):
-        raise BlygStampError(f"{path}: {problem}")
+    lines = body.split("\n")
+    for lineno, line, _ in find_directives(body):
+        try:
+            partial_selection(lines, lineno)
+        except ValueError as exc:
+            raise BlygStampError(f"{path}: body line {lineno}: {line!r}: {exc} (§10.1)") from None
 
 
-# resolve(target_id, drawing_item_id) -> (version, source body, nested
-# snapshots) for an item that is published after this run -- nested is
-# None for a fragment, and a thread's own snapshots at that version for a
-# thread -- or a string saying why it can't be transcluded.
-Resolver = Callable[[str, "str | None"], "tuple[int, str, list | None] | str"]
+# resolve(target_id, drawing_item_id) -> (version, source body, extra)
+# for an item that is published after this run -- extra is what else its
+# snapshot carries: for a thread, "kind" and that version's own snapshots,
+# and for a source with [[id]] links, that version's resolved links -- or
+# a string saying why it can't be transcluded.
+Resolver = Callable[[str, "str | None"], "tuple[int, str, dict] | str"]
+
+# resolve_link(target_id) -> {id, page, text} for an item that is
+# published after this run, or a string saying why it can't be linked.
+LinkResolver = Callable[[str], "dict | str"]
 
 # stale(snapshot) -> why a stored snapshot no longer names what its
 # source's version holds after this run, or None if it still does.
@@ -450,7 +538,8 @@ def snapshot_staleness(snapshot: dict, source: dict | None) -> str | None:
             source["withdrawn"] or source["kind"] != snapshot.get("kind", "fragment")
             or source["last_hash"] != snapshot.get("content_hash")
             or (source["kind"] == "thread"
-                and source.get("transclusions", []) != snapshot.get("transclusions", []))):
+                and source.get("transclusions", []) != snapshot.get("transclusions", []))
+            or source.get("links", []) != snapshot.get("links", [])):
         return f"{sid} v{version} was rewritten in place"
     return None
 
@@ -472,9 +561,18 @@ def resolve_directives(item: "Item", resolve: Resolver) -> list[dict]:
 
     A thread source's snapshot also carries "kind": "thread" and that
     version's own snapshots, nested -- its content_html bakes them, so
-    they're part of what's quoted, and nesting is nested blockquotes.
-    A fragment's has neither, exactly as before threads were quotable."""
+    they're part of what's quoted, and nesting is nested blockquotes --
+    and a source with [[id]] links carries the links that version
+    resolved, which its content_html renders. A plain fragment's has none
+    of these, exactly as before threads were quotable.
+
+    A partial transclusion's snapshot is the same whole snapshot plus its
+    "selection" (§10.1): the bake is the selection's text, but checking it
+    against the source's text content (§10.2) needs the source rendered,
+    which the build does -- partials/blyg/bake.html fails on a selection
+    the source doesn't contain, and blyg_validate.py checks again."""
     snapshots = []
+    quoted = selections(item.body)
     for lineno, line, _ in find_directives(item.body):
         target = DIRECTIVE_RE.match(line).group(1)
         resolved = resolve(target, item.blyg_id)
@@ -483,15 +581,52 @@ def resolve_directives(item: "Item", resolve: Resolver) -> list[dict]:
                 f"{item.path}: body line {lineno}: {line!r} can't be resolved: "
                 f"{resolved} -- every directive MUST resolve to a local, "
                 f"currently-published item (§10.2)")
-        version, source, nested = resolved
+        version, source, extra = resolved
         snapshot = {"id": target, "version": version, "line": lineno,
                     "content_hash": content_hash(strip_gen_markers(source)),
-                    "content_md": source}
-        if nested is not None:
-            snapshot["kind"] = "thread"
-            snapshot["transclusions"] = nested
+                    "content_md": source, **extra}
+        if lineno in quoted:
+            snapshot["selection"] = quoted[lineno][0]
         snapshots.append(snapshot)
     return snapshots
+
+
+def resolve_links(item: "Item", resolve_link: LinkResolver) -> list[dict]:
+    """§10.1: every [[id]] link resolves at publish time, by the same order
+    as a directive, or it's a publish error. Each resolves to the target's
+    page as of now and the anchor text it renders with, stored with the
+    version so later changes to the target don't move these bytes -- a
+    link asserts nothing on the target's behalf, so it never changes
+    either (no provenance, §10.3)."""
+    links = []
+    for target in find_links(item.body):
+        resolved = resolve_link(target)
+        if isinstance(resolved, str):
+            raise BlygStampError(
+                f"{item.path}: [[{target}]] can't be resolved: {resolved} -- every "
+                f"internal link MUST resolve to a local, currently-published "
+                f"item (§10.1)")
+        links.append(resolved)
+    return links
+
+
+def set_links(entry: dict, links: list[dict]) -> None:
+    """Like set_transclusions: present only while the version has any."""
+    if links:
+        entry["links"] = links
+    else:
+        entry.pop("links", None)
+
+
+def check_stored_links(item: "Item", entry: dict) -> None:
+    """An unchanged item keeps the links it was published with, checked
+    only for having been resolved from exactly this body."""
+    want = [] if entry["withdrawn"] else find_links(item.body)
+    got = [link.get("id") for link in entry.get("links", [])]
+    if got != want:
+        raise BlygStampError(
+            f"{item.path}: ledger entry {item.blyg_id} records links to {got} but "
+            f"the body links {want} -- the ledger was edited by hand; restore it")
 
 
 def snapshot_hash_mismatches(snapshots: list[dict]):
@@ -521,9 +656,11 @@ def check_stored_transclusions(item: "Item", entry: dict) -> None:
     if entry["withdrawn"] or entry["kind"] != "thread":
         want = []
     else:
-        want = [(lineno, DIRECTIVE_RE.match(line).group(1))
+        quoted = selections(item.body)
+        want = [(lineno, DIRECTIVE_RE.match(line).group(1),
+                 quoted[lineno][0] if lineno in quoted else None)
                 for lineno, line, _ in find_directives(item.body)]
-    got = [(s.get("line"), s.get("id")) for s in stored]
+    got = [(s.get("line"), s.get("id"), s.get("selection")) for s in stored]
     if got != want:
         raise BlygStampError(
             f"{item.path}: ledger entry {item.blyg_id} records transclusions "
@@ -704,7 +841,8 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
                   published: dict | None = None,
                   resolve: Resolver | None = None,
                   stale: StaleCheck | None = None,
-                  resolve_source: SourceResolver | None = None) -> Plan:
+                  resolve_source: SourceResolver | None = None,
+                  resolve_link: LinkResolver | None = None) -> Plan:
     """Plan one file. `published` is the ledger as of the last deploy,
     and is only passed with --amend: when it is, a latest version that
     ledger doesn't contain yet has never been served, so it is rewritten
@@ -724,12 +862,16 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
 
     `resolve_source` pins a generated span's sources to exact versions
     (§5.7); like `resolve`, it's only consulted when a version is created,
-    so an unchanged item keeps the provenance it was published with."""
+    so an unchanged item keeps the provenance it was published with.
+    `resolve_link` resolves [[id]] links (§10.1) the same way: when a
+    version is created, and never again for it."""
     warning = None
     if resolve is None:
         resolve = lambda target: "no resolver given"  # noqa: E731
     if resolve_source is None:
         resolve_source = lambda target, version, drawing: "no source resolver given"  # noqa: E731
+    if resolve_link is None:
+        resolve_link = lambda target: "no link resolver given"  # noqa: E731
     if not item.withdrawn_flag:
         check_directives(item.path, item.body, item.kind)
         if item.kind == "fragment" and len(item.content_md) > FRAGMENT_SOFT_CAP:
@@ -758,6 +900,7 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
                 f"but items/{{id}}.json MUST stay 200 forever once published (§4)")
         created = iso8601_utc(item.publish_at)
         snapshots = resolve_directives(item, resolve) if item.kind == "thread" else []
+        links = resolve_links(item, resolve_link)
         generated = resolve_generated(item, resolve_source)
 
         if not write:
@@ -784,6 +927,7 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
             "changelog": [changelog_entry(1, created, note, item.kind)],
         }
         set_transclusions(entry, snapshots)
+        set_links(entry, links)
         set_generated(entry, generated)
         return Plan(kind="new", path=item.path, blyg_id=new_id,
                     detail=f"assign id, v1 @ {created}",
@@ -833,6 +977,7 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
     stale_reasons = []
     if desired == current:
         check_stored_transclusions(item, entry)
+        check_stored_links(item, entry)
         if stale is not None:
             stale_reasons = [r for r in map(stale, entry.get("transclusions", [])) if r]
         if stale_reasons and published is None:
@@ -877,6 +1022,7 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
         # The shipped version's snapshots, not fresh ones: v{n} is what
         # readers already have, down to the baked transclusions.
         set_transclusions(new_entry, copy.deepcopy(pub.get("transclusions", [])))
+        set_links(new_entry, copy.deepcopy(pub.get("links", [])))
         set_generated(new_entry, copy.deepcopy(pub.get("generated", [])))
         verb = "would revert" if not write else "revert"
         return Plan(kind="revert", path=item.path, blyg_id=item.blyg_id,
@@ -892,6 +1038,7 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
     publishing_thread = desired[0] == "thread" and not desired[1]
     set_transclusions(new_entry,
                       resolve_directives(item, resolve) if publishing_thread else [])
+    set_links(new_entry, resolve_links(item, resolve_link) if not desired[1] else [])
     set_generated(new_entry,
                   resolve_generated(item, resolve_source) if not desired[1] else [])
 
@@ -988,23 +1135,39 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
                     todo.append(s["id"])
         return seen
 
-    def resolve(target: str, drawing: str | None) -> tuple[int, str, list | None] | str:
+    def resolve(target: str, drawing: str | None) -> tuple[int, str, dict] | str:
         item = by_id.get(target)
         if item is None or target not in ledger:
             return f"{target} isn't a published item on this origin (unknown id or draft)"
         if item.withdrawn_flag:
             return f"{target} is withdrawn"
-        if item.kind == "fragment":
-            return after[target]["version"], item.body, None
-        # §10.2's one local closure check: a thread MUST NOT quote a thread
-        # that quotes it back, at any depth -- itself included.
-        if target == drawing:
-            return f"{target} is this thread; a thread can't transclude itself"
-        if target not in after or (drawing is not None and drawing in closure(target)):
-            return (f"{target} transcludes this thread, directly or through other "
-                    f"threads, and a thread MUST NOT quote one that quotes it (§10.2)")
-        return (after[target]["version"], item.body,
-                copy.deepcopy(after[target].get("transclusions", [])))
+        extra: dict = {}
+        if item.kind == "thread":
+            # §10.2's one local closure check: a thread MUST NOT quote a
+            # thread that quotes it back, at any depth -- itself included.
+            if target == drawing:
+                return f"{target} is this thread; a thread can't transclude itself"
+            if target not in after or (drawing is not None and drawing in closure(target)):
+                return (f"{target} transcludes this thread, directly or through other "
+                        f"threads, and a thread MUST NOT quote one that quotes it (§10.2)")
+            extra = {"kind": "thread",
+                     "transclusions": copy.deepcopy(after[target].get("transclusions", []))}
+        links = copy.deepcopy(after[target].get("links", []))
+        if links:
+            extra["links"] = links
+        return after[target]["version"], item.body, extra
+
+    def resolve_link(target: str) -> dict | str:
+        # Same order as a directive (§10.1): a local, currently-published
+        # item. Its page is its permalink after this run -- the authored
+        # kind, which a published, unwithdrawn item ships with.
+        item = by_id.get(target)
+        if item is None or target not in ledger:
+            return f"{target} isn't a published item on this origin (unknown id or draft)"
+        if item.withdrawn_flag:
+            return f"{target} is withdrawn"
+        return {"id": target, "page": f"{'f' if item.kind == 'fragment' else 't'}/{target}/",
+                "text": link_text(item.body) or target}
 
     def stale(snapshot: dict) -> str | None:
         source = after.get(snapshot.get("id")) or ledger.get(snapshot.get("id"))
@@ -1059,7 +1222,7 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
         item = items[i]
         plan = plan_for_item(item, ledger, write=write, now=now, note=note,
                              published=published, resolve=resolve, stale=stale,
-                             resolve_source=resolve_source)
+                             resolve_source=resolve_source, resolve_link=resolve_link)
         by_index[i] = plan
         if plan.blyg_id is not None and plan.next_entry is not None:
             after[plan.blyg_id] = plan.next_entry

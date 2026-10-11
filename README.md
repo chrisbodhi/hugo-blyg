@@ -1,7 +1,7 @@
 # hugo-blyg
 
 A Hugo Module that builds the static publish-side surfaces of the
-[Blygger protocol](https://blygger.org/spec/0.3/) v0.3, Level 1
+[Blygger protocol](https://blygger.org/spec/0.3/) v0.3, Level 1 or 2
 — `blyg.json` (manifest), `feed.xml`, `items/index.json` (archive index),
 `items/{id}.json` (canonical item documents), and, optionally,
 `blogroll.opml` (§11) — plus human-readable HTML pages for the feed,
@@ -216,13 +216,11 @@ who's read Hugo's own RSS template will already expect to see.
   (`note — excerpt`), or the excerpt alone when the event has no note.
   The withdrawal event of a currently-withdrawn item is titled
   `withdrawn`, literally, as §7 requires by name.
-- Two pieces of 0.3 grammar aren't built yet, and the stamp script
-  refuses them rather than publish them with their old meaning (§10.1):
-  a `![[id]]` directive with a blockquote directly under it (a partial
-  transclusion — put a blank line between to quote the whole item and
-  then your own blockquote), and an inline `[[id]]` outside code (a
-  plain internal link — use an ordinary markdown link to the item's
-  page, or put it in backticks).
+- An inline `[[id]]` outside code is a plain internal link (§10.1): it
+  renders as a link to that item's page, resolved when the stamp script
+  runs, and an id it can't resolve is a publish error. Put it in
+  backticks or a code fence to keep it as text. See "Transclusion" for
+  quoting part of an item instead.
 - A changelog note describes a change; it never reproduces withheld
   content (§5.2). Where the previous version isn't pinned, a note MUST
   NOT quote its text — nothing can check that, so it's on the author.
@@ -230,9 +228,14 @@ who's read Hugo's own RSS template will already expect to see.
 ## Conformance level
 
 `blyg.json`'s `"level"` field (§3) comes from the consuming site's own
-`[params.blyg].level`, defaulting to `1` when unset. This module only
-accepts `1` — it fails the build on anything else. Level 1 is the
-single-origin protocol, carried into 0.3 from 0.2; the manifest's
+`[params.blyg].level`, defaulting to `1` when unset. This module
+accepts `1` or `2` and fails the build on anything else. Level 1 is the
+single-origin protocol, carried into 0.3 from 0.2. A publisher conforms
+at Level 2 by following its rules for whatever L2 constructs it emits
+(§3): this module emits `page` (§5.8) and enforces the local closure
+check on nested quotes (§10.2), and never quotes another origin, stubs
+or forks, so `2` is an honest claim too, and Webmention is optional at
+every level (§15.7). The manifest's
 `"blyg": "0.3"` names the spec version, not the level (§3.1), and
 `"generator_url"` points at this repository (§6.1). Note the blogroll is optional at *every* level and
 never changes the level, and generation provenance (§5.7) is L1 — it
@@ -437,8 +440,27 @@ whitespace around a directive must be spaces and tabs: anything else
 wouldn't read the line as a block of its own. Only
 threads transclude, only this site's own items can be transcluded
 (0.3 allows other origins' items too, which this module doesn't build),
-and the reserved `![[id@vN]]` form is refused, as is a partial
-transclusion (see "Content contract").
+and the reserved `![[id@vN]]` form is refused.
+
+**Partial transclusion.** A blockquote directly under the directive, no
+blank line between, quotes just that text (§10.1):
+
+```md
+![[5cx94j6wbmzrdnnjxvs9j1nkba]]
+> a root-relative link and an image from the
+> origin’s media directory
+```
+
+It bakes as `<blockquote class="blyg-transclusion blyg-partial" …>` with
+the selection as plain text, one `<p>` per paragraph of it, and the
+thread's `transclusions` entry carries a `selector` with the exact text
+(§10.3). The selection has to appear in the source's rendered text
+exactly — soft line breaks don't matter, but the typographer's curly
+quotes do (`origin’s`, not `origin's`) — or the build fails (§10.2): the
+stamp script works from Markdown, so only the build can check. A blank
+line between the directive and the blockquote quotes the whole item,
+followed by your own blockquote, and a quote has to end with a blank
+line.
 
 **Resolution happens in `blyg_stamp.py`, at publish time, never in the
 build.** Hugo rebuilds everything on every deploy, so a template that
@@ -755,11 +777,11 @@ included. To write one literally, use Hugo's escaped form,
 
 ## Not yet built
 
-0.3's grammar for partial transclusions and `[[id]]` links (refused for
-now, see "Content contract") and its Level 2
-cross-client constructs: stubs, lineage (`forked_from`), `cited`, and
-Webmention. All of them are optional to emit. (The `page` field is built:
-see "HTML pages".)
+0.3's cross-origin constructs: quoting other origins' items, stubs,
+lineage (`forked_from`), `cited`, and Webmention — Level 2's business,
+all optional to emit. Everything 0.3 adds within one origin is built:
+nested and partial transclusion, `[[id]]` links, `page` and
+`generator_url`.
 
 ## Developing hugo-blyg
 

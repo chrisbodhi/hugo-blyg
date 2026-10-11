@@ -84,6 +84,20 @@ def item_doc(blyg_id, *, kind="thread", version=1, withdrawn=False, body="Body.\
     return doc
 
 
+class TextContentTests(unittest.TestCase):
+    """§10.2's text content, as partial transclusions are checked against."""
+
+    def test_blocks_become_lines_and_whitespace_collapses(self):
+        self.assertEqual(bv.text_content(
+            "<p>One <em>two</em>\n  three.</p>\n<ul>\n<li>Four &amp; five</li>\n</ul>"),
+            "One two three.\nFour & five")
+
+    def test_nested_quotes_and_breaks(self):
+        self.assertEqual(bv.text_content(
+            '<blockquote class="blyg-transclusion"><p>A<br>B</p></blockquote><p>C</p>'),
+            "A\nB\nC")
+
+
 class SurfaceTests(unittest.TestCase):
     """A hand-built surface, validated end to end, then broken one way at a time."""
 
@@ -199,6 +213,12 @@ class SurfaceTests(unittest.TestCase):
         self.feed_items = [self.feed_item(ID, 1, self.docs[ID], title="first \u2014 Body.")]
         self.assertEqual(self.problems(), [])
 
+    def test_level_is_1_or_2(self):
+        self.manifest_extra = {"level": 2}
+        self.assertEqual(self.problems(), [])
+        self.manifest_extra = {"level": 3}
+        self.assertTrue(any("only 1 and 2" in p for p in self.problems()))
+
     def test_generator_url_must_be_absolute(self):
         self.manifest_extra = {"generator_url": "https://example.net/src"}
         self.assertEqual(self.problems(), [])
@@ -215,12 +235,27 @@ class SurfaceTests(unittest.TestCase):
         self.feed_items = [self.feed_item(ID, 1, self.docs[ID], title="")]
         self.assertTrue(any("MUST carry a <title>" in p for p in self.problems()))
 
-    def test_unsupported_grammar_in_content_md_fails(self):
-        # The stamp refuses it first; this is the backstop on the wire.
+    def link_to_self(self, html):
+        if type(self) is not SurfaceTests:
+            self.skipTest("replaces the item with a self-link; the base surface's alone")
         body = f"See [[{ID}]].\n"
-        self.docs[ID] = item_doc(ID, body=body, html="<p>See it.</p>")
+        self.docs[ID] = item_doc(ID, body=body, html=html)
         self.ledger[ID]["last_hash"] = bs.content_hash(body)
-        self.assertTrue(any("plain internal link" in p for p in self.problems()))
+
+    def test_a_resolved_link_renders_as_an_anchor(self):
+        self.link_to_self(f'<p>See <a href="{ORIGIN}t/{ID}/">Body.</a>.</p>')
+        self.ledger[ID]["links"] = [{"id": ID, "page": f"t/{ID}/", "text": "Body."}]
+        self.assertEqual(self.problems(), [])
+
+    def test_an_unresolved_link_fails(self):
+        # The stamp refuses it first; this is the backstop on the wire.
+        self.link_to_self(f"<p>See [[{ID}]].</p>")
+        self.assertTrue(any("MUST resolve (§10.1)" in p for p in self.problems()))
+
+    def test_a_link_must_render_its_anchor(self):
+        self.link_to_self(f"<p>See [[{ID}]].</p>")
+        self.ledger[ID]["links"] = [{"id": ID, "page": f"t/{ID}/", "text": "Body."}]
+        self.assertTrue(any("isn't rendered as an anchor" in p for p in self.problems()))
 
     def test_feed_description_must_be_latest_content(self):
         self.feed_items = [self.feed_item(ID, 1, self.docs[ID], description="<p>old</p>")]
@@ -573,6 +608,40 @@ class TransclusionSurfaceTests(SurfaceTests):
     def test_a_quoted_thread_must_be_baked_with_its_own_quotes(self):
         self.quote_the_thread(inner_html="<p>Intro.</p>\n")
         self.assertTrue(any("byte-identical" in p for p in self.problems()))
+
+    def quote_partially(self, selection="Quoted.", bake=None):
+        body = f"Intro.\n\n![[{FRAG}]]\n> {selection}\n"
+        lines = (bake if bake is not None else selection).split("\n")
+        baked = (f'<blockquote class="blyg-transclusion blyg-partial" data-blyg-id="{FRAG}" '
+                 f'data-blyg-version="1">' + "".join(f"<p>{escape(l)}</p>" for l in lines)
+                 + "</blockquote>")
+        self.docs[ID] = item_doc(ID, body=body, html=f"<p>Intro.</p>\n{baked}")
+        self.docs[ID]["transclusions"] = [{"id": FRAG, "version": 1,
+                                           "selector": {"exact": selection}}]
+        self.ledger[ID]["last_hash"] = bs.content_hash(body)
+        self.ledger[ID]["transclusions"][0]["selection"] = selection
+
+    def test_a_partial_transclusion_passes(self):
+        self.quote_partially("Quoted.")
+        self.assertEqual(self.problems(), [])
+
+    def test_a_partial_must_carry_its_selector(self):
+        self.quote_partially()
+        del self.docs[ID]["transclusions"][0]["selector"]
+        self.assertTrue(any("(§10.3)" in p for p in self.problems()))
+
+    def test_a_partial_bake_is_the_selection(self):
+        self.quote_partially("Quoted.", bake="Quoted, sort of.")
+        self.assertTrue(any("one <p> per line" in p for p in self.problems()))
+
+    def test_a_partial_whole_bake_fails(self):
+        self.quote_partially()
+        self.docs[ID]["content_html"] = "<p>Intro.</p>\n" + bv.wrapper(FRAG, 1, self.FRAG_HTML)
+        self.assertTrue(any("blyg-partial class" in p for p in self.problems()))
+
+    def test_a_selection_not_in_the_source_fails(self):
+        self.quote_partially("Misquoted.")
+        self.assertTrue(any("isn't in that version's text" in p for p in self.problems()))
 
     def test_a_quote_cycle_fails(self):
         self.quote_the_thread()

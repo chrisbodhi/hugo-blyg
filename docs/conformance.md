@@ -28,16 +28,16 @@ three in every workflow that builds, above all the one that actually ships
    checked against this list and against the ledger — above all the
    rendered `content_html`, which only exists after Hugo runs.
 
-Scope: this module publishes the 0.3 surfaces at Level 1 only — the
-single-origin protocol 0.3 carries forward from 0.2 — as a single-author,
-non-multiplayer origin. None of 0.3's cross-client constructs (remote
-transclusion, thread nesting, stubs, lineage, `page`, `cited`, Webmention)
-are emitted, all of which are optional to emit (§3); the two pieces of
-0.3 grammar that would change what existing bytes mean are refused (§10
-below). Every item authors its `kind` via
+Scope: this module publishes the 0.3 surfaces as a single-author,
+non-multiplayer origin, claiming Level 1. Of 0.3's additions it builds
+everything that stays on one origin: thread nesting, partial
+transclusion and `[[id]]` links (§10), `page` (§5.8) and
+`generator_url` (§6.1). The cross-origin constructs (remote
+transclusion, stubs, lineage, `cited`, Webmention) aren't emitted, all
+of which are optional (§3). Every item authors its `kind` via
 `blyg_kind` in front matter (`"fragment"` or `"thread"`; defaults to
 `"thread"`), and threads resolve `![[id]]` directives against the
-site's own fragments at publish time (§10). A site that writes
+site's own items at publish time (§10). A site that writes
 `data/blyg/blogroll.json` serves a blogroll (§11). Generated spans are
 marked with the module's `blyg-gen` shortcode and disclosed as
 `generated` (§5.7).
@@ -205,8 +205,12 @@ marked with the module's `blyg-gen` shortcode and disclosed as
       `title`, `feed`, `items`, `updated`; `blogroll` key present only
       when a non-empty blogroll is served (§11 below).
       `level` comes from `[params.blyg].level` in `config.toml`
-      (defaults to `1`); the build refuses any value other than `1`. The
-      blogroll never changes the level, and generation provenance is L1.
+      (defaults to `1`); the build accepts `1` or `2`. L2 asks a
+      publisher to follow its rules for the L2 constructs it emits (§3):
+      here `page` (§5.8) and the local closure check (§10.2) — it never
+      quotes another origin, stubs or forks, and Webmention is optional at
+      every level (§15.7). The blogroll never changes the level, and
+      generation provenance is L1.
 - [ ] Item documents carry `"blyg": "0.3"` too. Pin files keep whatever
       they were written with — a 0.2 pin is a valid 0.3 document (§3) and
       its bytes are promised forever (§8) — so the validator checks the
@@ -242,7 +246,8 @@ marked with the module's `blyg-gen` shortcode and disclosed as
 - [ ] `<description>` HTML MUST be self-contained: every URL absolute
       (§5.2), no dependence on the origin's stylesheets or scripts.
       `partials/blyg/absolute-urls.html` absolutizes root-relative URLs and
-      in-document `#anchors` in any URL attribute (either quote style),
+      in-document `#anchors` in any URL attribute (either quote style;
+      `[[id]]` links render absolute to begin with),
       root-relative `srcset` candidates, and inline-style `url()`;
       `blyg_validate.py` fails the build on anything left non-absolute
       (page-relative and empty URLs included) and on origin-hosted scripts
@@ -398,20 +403,36 @@ no-cascade rule against real builds in CI.)*
       local thread whose transitive closure, walked via stored
       `transclusions`, contains it — itself included. `blyg_stamp.py`
       refuses one; `blyg_validate.py` flags a cycle on the wire.
-- [ ] 0.3 grammar this module doesn't build is refused, never shipped
-      with its 0.2 meaning (`unsupported_grammar` in `blyg_stamp.py`, run
-      by the stamp and again by `blyg_validate.py` on every `content_md`):
-      - a directive followed directly by a blockquote, no blank line
-        between, is a partial transclusion (§10.1), whose selection MUST
-        be checked against the source's text. Baking the whole item there
-        would misquote, so it's refused; `item.html` fails the build on
-        one too, for content stamped before 0.3. A blank line detaches the
-        blockquote, as the spec says.
-      - `[[id]]` outside code is a plain internal link (§10.1), which MUST
-        render as an absolute anchor. Shipping the literal text would be
-        wrong, so it's refused — as code spans and fences keep it inert,
-        they're left alone; an indented code block isn't recognized, so
-        fence it.
+- [ ] Partial transclusion (§10.1): a directive followed directly by a
+      blockquote, no blank line between, quotes the blockquote's text —
+      its paragraphs, soft-wrapped lines joined, one per line. A blank
+      line detaches the blockquote, as the spec says. A quote that runs
+      on into an unquoted line (a lazy continuation Markdown would read
+      as more of it) or quotes nothing is refused at stamp time.
+- [ ] The selection MUST be a substring of the source's text content at
+      the baked version (§10.2). Text content needs the rendered HTML,
+      which the stamp doesn't have, so the build checks it
+      (`partials/blyg/text-content.html`) and fails on a misquote, and
+      `blyg_validate.py` re-checks wherever that version's HTML is still
+      served. The selection is literal text: Markdown in it isn't
+      rendered, and the typographer's curly quotes have to be quoted as
+      they read.
+- [ ] The bake is `<blockquote class="blyg-transclusion blyg-partial"
+      data-blyg-id data-blyg-version>` holding one escaped `<p>` per line
+      of the selection; its `transclusions` entry carries `selector:
+      {exact}` (§10.3; prefix and suffix are optional and not emitted).
+      A snapshot stamped before 0.3 has no selection, so the build fails
+      on one that now has a blockquote attached rather than misquote.
+- [ ] `[[id]]` outside code is a plain internal link (§10.1), resolved at
+      stamp time by the same order as a directive — a fragment may link
+      too — and stored in the ledger as `{id, page, text}`. It renders as
+      `<a href="{origin}{page}">` with the target's first line of prose
+      as its text (presentation), and records no provenance. An
+      unresolvable link is a publish error. Code spans, fences and
+      partial selections keep it inert; the build fails on a live one
+      the ledger didn't resolve. The page is fixed at publish, so a later
+      kind change doesn't move these bytes (the old path redirects); with
+      pages off it's the conventional path readers fall back to (§5.8).
 - [ ] A line consisting solely of `![[` + a 26-character item id + `]]`
       is a transclusion directive; the same sequence elsewhere is inert
       text. Fenced code is recognized as inert; a directive-shaped line

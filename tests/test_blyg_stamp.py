@@ -608,47 +608,139 @@ class TransclusionDirectiveTests(StampHelpers):
         self.assertTrue(self.ledger()[blyg_id]["withdrawn"])
 
 
-class UnsupportedGrammarTests(StampHelpers):
-    """0.3 grammar this module doesn't build yet (§10.1) is refused, not
-    shipped with its 0.2 meaning."""
+class PartialAndLinkGrammarTests(unittest.TestCase):
+    """0.3's grammar (§10.1): partial transclusions and [[id]] links."""
 
     ID = "7c9wk2mhq0v3xj8tn5rzfd41bg"
 
     def test_attached_blockquote_is_a_partial_transclusion(self):
-        write_post(self.content_dir, "t.md", FM, f"![[{self.ID}]]\n> a selection\n")
-        with self.assertRaisesRegex(bs.BlygStampError, "partial transclusion"):
-            self.stamp()
-        self.assertFalse(self.ledger_path.exists())
+        body = f"Intro.\n\n![[{self.ID}]]\n> a selection\n\nAfter.\n"
+        self.assertEqual(bs.selections(body), {3: ("a selection", 4)})
 
     def test_indented_attached_blockquote_is_a_partial_transclusion(self):
-        self.assertEqual(len(bs.unsupported_grammar(f"- item\n\n  ![[{self.ID}]]\n  > a selection\n")), 1)
+        body = f"- item\n\n  ![[{self.ID}]]\n  > a selection\n"
+        self.assertEqual(bs.selections(body), {3: ("a selection", 4)})
 
     def test_a_blank_line_detaches_the_blockquote(self):
-        self.assertEqual(bs.unsupported_grammar(f"![[{self.ID}]]\n\n> my own quote\n"), [])
+        self.assertEqual(bs.selections(f"![[{self.ID}]]\n\n> my own quote\n"), {})
 
-    def test_internal_link_is_refused(self):
-        write_post(self.content_dir, "t.md", FM, f"See [[{self.ID}]] for more.\n")
-        with self.assertRaisesRegex(bs.BlygStampError, "plain internal link"):
-            self.stamp()
-        self.assertFalse(self.ledger_path.exists())
+    def test_selection_paragraphs_become_lines(self):
+        # Soft-wrapped lines join; a quoted blank line is a block boundary.
+        body = f"![[{self.ID}]]\n> one\n>   wrapped\n>\n>two\n"
+        self.assertEqual(bs.selections(body), {1: ("one wrapped\ntwo", 5)})
 
-    def test_internal_link_in_a_fragment_is_refused_too(self):
-        write_post(self.content_dir, "f.md", FM + 'blyg_kind = "fragment"\n',
-                   f"See [[{self.ID}]].\n")
-        with self.assertRaisesRegex(bs.BlygStampError, "plain internal link"):
-            self.stamp()
+    def test_a_selection_running_on_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "blank line"):
+            bs.selections(f"![[{self.ID}]]\n> quoted\nnot quoted\n")
 
-    def test_inert_link_forms_are_fine(self):
+    def test_an_empty_selection_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "quotes nothing"):
+            bs.selections(f"![[{self.ID}]]\n>\n")
+
+    def test_live_links_in_order_of_first_use(self):
+        other = "5cx94j6wbmzrdnnjxvs9j1nkba"
+        body = f"See [[{other}]], [[{self.ID}]] and [[{other}]] again.\n"
+        self.assertEqual(bs.find_links(body), [other, self.ID])
+
+    def test_inert_link_forms(self):
         body = (f"In code, `[[{self.ID}]]` and ``a [[{self.ID}]] b`` are text.\n\n"
                 f"```\n[[{self.ID}]]\n```\n\n"
                 f"Inline ![[{self.ID}]] is text, not a link.\n\n"
                 f"[[notanid]] and [[{self.ID.upper()}]] aren't ids.\n")
-        self.assertEqual(bs.unsupported_grammar(body), [])
-        write_post(self.content_dir, "t.md", FM, body)
-        self.assertEqual(self.stamp()[0].kind, "new")
+        self.assertEqual(bs.find_links(body), [])
 
     def test_a_link_between_code_spans_is_live(self):
-        self.assertEqual(len(bs.unsupported_grammar(f"`a` [[{self.ID}]] `b`\n")), 1)
+        self.assertEqual(bs.find_links(f"`a` [[{self.ID}]] `b`\n"), [self.ID])
+
+    def test_a_link_inside_a_selection_is_quoted_text(self):
+        body = f"![[{self.ID}]]\n> see [[{self.ID}]]\n"
+        self.assertEqual(bs.find_links(body), [])
+
+    def test_link_text_is_the_first_line_of_prose(self):
+        self.assertEqual(bs.link_text("# A *title*\n\nBody.\n"), "A title")
+        self.assertEqual(bs.link_text(f"![[{self.ID}]]\n\n[Linked](https://x.y) text.\n"),
+                         "Linked text.")
+        self.assertEqual(bs.link_text("```\ncode\n```\n> quoted\n"), "quoted")
+        long = bs.link_text("word " * 30)
+        self.assertTrue(long.endswith("\u2026") and len(long) <= bs.LINK_TEXT_CAP + 1, long)
+        self.assertEqual(bs.link_text(""), "")
+
+
+class PartialAndLinkStampTests(StampHelpers):
+    """Resolving them at publish time (§10.1, §10.2)."""
+
+    FRAG = FM + 'blyg_kind = "fragment"\n'
+
+    def setUp(self):
+        super().setUp()
+        self.frag = self.first("z-frag.md", fm=self.FRAG, body="Quoted words here.\n")
+
+    def test_a_partial_snapshot_carries_its_selection(self):
+        write_post(self.content_dir, "a.md", FM, f"![[{self.frag}]]\n> words\n")
+        thread_id = self.stamp()[0].blyg_id
+        [t] = self.ledger()[thread_id]["transclusions"]
+        self.assertEqual((t["id"], t["version"], t["line"], t["selection"]),
+                         (self.frag, 1, 1, "words"))
+        self.assertEqual(t["content_md"], "Quoted words here.\n")
+
+    def test_a_selection_running_on_is_refused_at_stamp(self):
+        write_post(self.content_dir, "a.md", FM, f"![[{self.frag}]]\n> words\nmore\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "blank line"):
+            self.stamp()
+
+    def test_a_link_resolves_to_the_targets_page(self):
+        write_post(self.content_dir, "a.md", FM, f"See [[{self.frag}]].\n")
+        item = self.stamp()[0].blyg_id
+        self.assertEqual(self.ledger()[item]["links"], [
+            {"id": self.frag, "page": f"f/{self.frag}/", "text": "Quoted words here."}])
+
+    def test_a_fragment_may_link(self):
+        write_post(self.content_dir, "a.md", self.FRAG, f"See [[{self.frag}]].\n")
+        item = self.stamp()[0].blyg_id
+        self.assertEqual([l["id"] for l in self.ledger()[item]["links"]], [self.frag])
+
+    def test_an_unresolvable_link_is_refused(self):
+        write_post(self.content_dir, "a.md", FM, "See [[7c9wk2mhq0v3xj8tn5rzfd41bg]].\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "unknown id or draft"):
+            self.stamp()
+        self.edit("a.md", "7c9wk2mhq0v3xj8tn5rzfd41bg", self.frag)
+        self.edit("z-frag.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        with self.assertRaisesRegex(bs.BlygStampError, "is withdrawn"):
+            self.stamp()
+
+    def test_a_link_is_not_re_resolved_when_its_target_moves(self):
+        write_post(self.content_dir, "a.md", FM, f"See [[{self.frag}]].\n")
+        item = self.stamp()[0].blyg_id
+        before = self.ledger()[item]
+        self.edit("z-frag.md", 'blyg_kind = "fragment"', 'blyg_kind = "thread"')
+        self.stamp()
+        self.assertEqual(self.ledger()[item], before)
+        self.edit("a.md", "See", "See now")
+        self.stamp()
+        self.assertEqual(self.ledger()[item]["links"][0]["page"], f"t/{self.frag}/")
+
+    def test_a_quoted_sources_links_ride_in_its_snapshot(self):
+        linker = self.first("y-frag.md", fm=self.FRAG, body=f"Links [[{self.frag}]].\n")
+        write_post(self.content_dir, "a.md", FM, f"![[{linker}]]\n")
+        thread_id = self.stamp()[0].blyg_id
+        [t] = self.ledger()[thread_id]["transclusions"]
+        self.assertEqual(t["links"], self.ledger()[linker]["links"])
+
+    def test_withdrawal_drops_links(self):
+        write_post(self.content_dir, "a.md", FM, f"See [[{self.frag}]].\n")
+        item = self.stamp()[0].blyg_id
+        self.edit("a.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        self.stamp()
+        self.assertNotIn("links", self.ledger()[item])
+
+    def test_hand_edited_links_are_refused(self):
+        write_post(self.content_dir, "a.md", FM, f"See [[{self.frag}]].\n")
+        item = self.stamp()[0].blyg_id
+        ledger = self.ledger()
+        del ledger[item]["links"]
+        bs.save_ledger(self.ledger_path, ledger)
+        with self.assertRaisesRegex(bs.BlygStampError, "edited by hand"):
+            self.stamp()
 
 
 class TransclusionResolutionTests(StampHelpers):

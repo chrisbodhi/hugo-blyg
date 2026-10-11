@@ -125,9 +125,46 @@ field $outer 'd["content_html"]' \
 echo "ok: a thread quoting a thread bakes its quote nested"
 
 # 7. The quoted thread can't quote back (§10.2's closure check).
+cp "$thread_md" "$work/thread.md.before"
 printf '\n![[%s]]\n' "$outer" >> "$thread_md"
 if err=$(python3 "$repo/scripts/blyg_stamp.py" 2>&1 >/dev/null); then
   fail "stamp let a thread quote a thread that quotes it"
 fi
 grep -q "MUST NOT quote one that quotes it" <<<"$err" || fail "refused, but not by the closure check: $err"
 echo "ok: a quote cycle is refused"
+cp "$work/thread.md.before" "$thread_md"
+
+# 8. A partial transclusion (§10.1) bakes the selection's plain text, one
+#    <p> per line, with a text-quote selector; a [[id]] link renders as an
+#    anchor to the target's page. Both resolve at stamp time. The quote is
+#    soft-wrapped across two lines and joined, and its apostrophe is the
+#    typographer's, as the fragment's text content reads.
+partial_md=content/blyg/2026-09-07-partial-quote.md
+printf '+++\ndate = "2026-09-07T12:00:00Z"\nblyg_kind = "thread"\n+++\nSee [[%s]], which says:\n\n![[%s]]\n> a root-relative link and an image from the\n> origin\xe2\x80\x99s media directory\n\nAnd `[[%s]]` in code is text.\n' \
+  "$fragment" "$fragment" "$fragment" > "$partial_md"
+stamp
+build
+partial=$(sed -n 's/^blyg_id = "\(.*\)"$/\1/p' "$partial_md")
+selection='a root-relative link and an image from the origin’s media directory'
+fragment_version=$(field $fragment 'd["version"]')
+[ "$(field $partial "d['transclusions'] == [{'id': '$fragment', 'version': $fragment_version, 'selector': {'exact': '$selection'}}]")" = True ] \
+  || fail "the partial transclusion's provenance doesn't carry its selector"
+field $partial 'd["content_html"]' \
+  | grep -qF "<blockquote class=\"blyg-transclusion blyg-partial\" data-blyg-id=\"$fragment\" data-blyg-version=\"$fragment_version\"><p>a root-relative link and an image from the origin’s media directory</p></blockquote>" \
+  || fail "the partial transclusion doesn't bake the selection as plain text"
+field $partial 'd["content_html"]' | grep -q "See <a href=\"$fragment_page\">An edited fragment with a root-relative link" \
+  || fail "the [[id]] link doesn't render as an anchor to the fragment's page"
+field $partial 'd["content_html"]' | grep -qF "<code>[[$fragment]]</code>" \
+  || fail "a [[id]] in code didn't stay text"
+echo "ok: a partial transclusion bakes its selection, and [[id]] links its target"
+
+# 9. A selection the source doesn't contain fails the build (§10.2) -- here
+#    the ASCII apostrophe the typographer turned into a curly one.
+sed -i.bak 's/origin’s media/origin'"'"'s media/' "$partial_md" && rm "$partial_md.bak"
+stamp
+rm -rf public
+if err=$(hugo --minify 2>&1); then
+  fail "hugo built a partial transclusion the source doesn't contain"
+fi
+grep -q "isn't in its text" <<<"$err" || fail "the build failed, but not on the selection: $err"
+echo "ok: a misquoted selection fails the build"

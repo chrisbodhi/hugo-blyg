@@ -18,17 +18,19 @@
   The conformance level actually served, from [params.blyg].level in the
   site's own config.toml (§3) -- defaults to 1 when unset, since that's
   what an empty config means for a site that hasn't opted into anything
-  higher. Only 1 is accepted for now: L1 is the single-origin protocol
-  0.3 carries forward from 0.2, which is what this module builds. (The
-  blogroll is optional at every level and never changes it; generation
-  provenance is L1.)
+  higher. 1 or 2: L1 is the single-origin protocol 0.3 carries forward
+  from 0.2, and a publisher conforms at L2 by following L2's rules for
+  the L2 constructs it emits (§3) -- here page (§5.8) and the local
+  closure check (§10.2); it never quotes another origin, stubs or forks,
+  and Webmention is optional at every level. (The blogroll is optional
+  at every level and never changes it; generation provenance is L1.)
 */ -}}
 {{- $level := 1 -}}
 {{- with site.Params.blyg -}}
   {{- with .level -}}{{- $level = . -}}{{- end -}}
 {{- end -}}
-{{- if ne $level 1 -}}
-  {{- errorf "blyg: config.toml [params.blyg].level is %v, but modules/hugo-blyg only implements Level 1 -- set it back to 1 until the L2+ surfaces it would claim are actually built" $level -}}
+{{- if not (in (slice 1 2) $level) -}}
+  {{- errorf "blyg: config.toml [params.blyg].level is %v, but modules/hugo-blyg conforms at Level 1 or 2 only (§3)" $level -}}
 {{- end -}}
 
 {{- $indexEntries := slice -}}
