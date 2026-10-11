@@ -102,7 +102,7 @@ try {
   const first = page.locator("article", { has: page.locator(`[data-item="${FIRST}"]`) });
   check(await first.locator(".vnav").count() === 0,
         "…but not the first fragment, whose one pin is its live version");
-  check(await page.locator(".thread-card .vnav").count() === 0, "…nor a thread's card");
+  check(await page.locator("article.thread .vnav").count() === 0, "…nor the thread, at v1 unpinned");
   await revised.locator('.vstep[data-step="-1"]').click();
   await page.waitForFunction(
     (id) => document.querySelector(`[data-item="${id}"] .vlabel`).textContent === "v2 · frozen", REVISED);
