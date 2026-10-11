@@ -31,6 +31,9 @@
 {{- $entry := .ledger -}}
 {{- $base := strings.TrimSuffix "/" .base -}}
 {{- $origin := printf "%s/blyg/" $base -}}
+{{- /* The item's live permalink (§8.4): what "#..." anchors resolve
+       against (§5.2) and, origin-relative, its page (§5.8). */ -}}
+{{- $self := partial "blyg/permalink.html" (dict "id" $page.Params.blyg_id "kind" $entry.kind "base" $base) -}}
 {{- $withdrawn := $entry.withdrawn -}}
 {{- $file := $page.File.Filename -}}
 
@@ -63,7 +66,6 @@
     the site builds pages, so the bytes don't depend on that setting.
   */ -}}
   {{- $html := printf "%s" $page.Content -}}
-  {{- $self := partial "blyg/permalink.html" (dict "id" $page.Params.blyg_id "kind" $entry.kind "base" $base) -}}
 
   {{- /*
     Transclusion (§10.2). scripts/blyg_stamp.py resolves each `![[id]]`
@@ -226,6 +228,16 @@
   "media" $media
   "changelog" $changelog
 -}}
+{{- /*
+  §5.8: the item's permalink page, origin-relative -- only while this
+  module writes the pages, since a page that 404s is worse than none.
+  Keyed on the authored kind like the permalink itself, so a withdrawn
+  item keeps it (§9); a kind change moves it, and the old path
+  redirects (layouts/blyg/page.html).
+*/ -}}
+{{- if partial "blyg/pages-enabled.html" $page -}}
+  {{- $doc = merge $doc (dict "page" (strings.TrimPrefix $origin $self)) -}}
+{{- end -}}
 {{- /*
   Generation provenance (§5.7): one entry per blyg-gen span, in document
   order, with each source pinned by scripts/blyg_stamp.py when the version

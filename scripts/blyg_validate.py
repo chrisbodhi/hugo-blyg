@@ -35,6 +35,7 @@ BLYG_NS = "https://blygger.org/ns/0.1"
 ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 GUID_RE = re.compile(r"^blyg:(" + bs.BLYG_ID_RE_SRC + r"):v([1-9][0-9]*)$")
 PIN_RE = re.compile(r"^v([1-9][0-9]*)\.json$")
+ABSOLUTE_URL_RE = re.compile(r"^https?://[^\s/]+\S*$")
 FEED_WINDOW = 50
 
 # Attributes whose value is one URL, and the subset that embeds media.
@@ -158,6 +159,9 @@ def check_manifest(public_blyg: Path, problems: Problems) -> dict | None:
     for key in ("generator", "site", "title"):
         if not isinstance(manifest.get(key), str) or not manifest[key]:
             problems.add("blyg.json", f"missing {key}")
+    if "generator_url" in manifest and not ABSOLUTE_URL_RE.match(str(manifest["generator_url"])):
+        problems.add("blyg.json", f"generator_url {manifest['generator_url']!r} isn't one "
+                                  f"absolute URL (§6.1)")
     if not str(manifest.get("site", "")).endswith("/"):
         problems.add("blyg.json", "site must be the origin base URL, ending in /")
     if not is_iso_z(manifest.get("updated")):
@@ -641,6 +645,21 @@ def pages_built(public_blyg: Path) -> bool:
     return any(item.find("link") is not None for item in root.iter("item"))
 
 
+def check_page_fields(public_blyg: Path, ledger: dict, docs: dict, origin: str,
+                      problems: Problems) -> None:
+    """§5.8: each item document's page names its live permalink, origin-
+    relative, exactly when the build wrote the pages -- withdrawn items
+    included (§9) -- and is absent otherwise, never naming a 404."""
+    with_pages = pages_built(public_blyg)
+    for blyg_id, doc in sorted(docs.items()):
+        where = f"items/{blyg_id}.json"
+        want = permalink(origin, blyg_id, ledger[blyg_id]["kind"])[len(origin):]
+        if with_pages and doc.get("page") != want:
+            problems.add(where, f"page is {doc.get('page')!r}, expected {want!r} (§5.8)")
+        elif not with_pages and "page" in doc:
+            problems.add(where, f"page {doc['page']!r}, but no item pages were built")
+
+
 def check_pages(public_blyg: Path, ledger: dict, docs: dict, origin: str,
                 problems: Problems) -> None:
     """§8.4 and §4's human-readable HTML, when the build wrote it: every
@@ -894,6 +913,7 @@ def validate(public_dir: Path, ledger_path: Path) -> Problems:
     if docs and manifest.get("updated") != max(d.get("updated", "") for d in docs.values()):
         problems.add("blyg.json", "updated != newest item's updated")
 
+    check_page_fields(public_blyg, ledger, docs, origin, problems)
     check_snapshots(public_blyg, ledger, docs, problems)
     check_index(public_blyg, ledger, docs, problems)
     check_pins(public_blyg, ledger, origin, problems)

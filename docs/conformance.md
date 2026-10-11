@@ -79,8 +79,9 @@ marked with the module's `blyg-gen` shortcode and disclosed as
       built but never listed (on unless `[params.blyg] pages = false`).
       Presentation, not protocol, except where §8.4 says otherwise (below),
       and so the pages change no protocol surface: with pages on and off,
-      every surface under `blyg/` comes out byte-identical, `feed.xml`
-      apart from each entry's `<link>` to its page (§7's example has one).
+      every surface under `blyg/` comes out byte-identical, apart from
+      the two places the protocol names the page: each live item
+      document's `page` (§5.8) and each `feed.xml` entry's `<link>` (§7).
       *(`tests/surfaces_e2e.sh` builds both in CI and compares.)*
       Their markup follows the reference client's CSS contract
       (blygger-spec `docs/css-contract.md`) and ships no CSS; the two wire
@@ -182,9 +183,25 @@ marked with the module's `blyg-gen` shortcode and disclosed as
       `.RenderString` — the transclusion path — renders it byte-identically
       to `.Content`.)*
 
+### §5.8 — The page field (OPTIONAL)
+
+- [ ] While the item pages are built, every live item document carries
+      `"page"`: its permalink, origin-relative (`f/{id}/`, `t/{id}/`) —
+      withdrawn items too, since the endcap's page stays 200. With pages
+      off it's omitted rather than name a 404. *(`blyg_validate.py`
+      checks both ways.)*
+- [ ] It follows the authored kind, so a kind change moves it (SHOULD be
+      stable); the old path keeps serving a redirect to the new one.
+- [ ] Each permalink page carries `<link rel="alternate"
+      type="application/json">` to its item document — the way back from
+      a page to what a receiver verifies (`partials/blyg/head.html`).
+- [ ] Pin files don't carry it: §8 doesn't list it, and existing pins'
+      bytes are frozen.
+
 ## §6 — Manifest and archive index
 
-- [ ] `blyg.json` carries `"blyg": "0.3"`, `level`, `generator`, `site`,
+- [ ] `blyg.json` carries `"blyg": "0.3"`, `level`, `generator`,
+      `generator_url` (SHOULD; this repository), `site`,
       `title`, `feed`, `items`, `updated`; `blogroll` key present only
       when a non-empty blogroll is served (§11 below).
       `level` comes from `[params.blyg].level` in `config.toml`

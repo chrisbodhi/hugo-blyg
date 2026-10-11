@@ -119,6 +119,8 @@ class SurfaceTests(unittest.TestCase):
         (self.blyg / "items" / "index.json").write_text(
             json.dumps({"updated": updated, "items": rows}), encoding="utf-8")
         for i, d in self.docs.items():
+            if self.pages is not None:  # §5.8: page names the live page
+                d.setdefault("page", bv.permalink(ORIGIN, i, self.ledger[i]["kind"])[len(ORIGIN):])
             (self.blyg / "items" / f"{i}.json").write_text(json.dumps(d), encoding="utf-8")
         items = self.feed_items
         if items is None:
@@ -196,6 +198,17 @@ class SurfaceTests(unittest.TestCase):
         self.docs[ID]["changelog"][0]["note"] = "first"
         self.feed_items = [self.feed_item(ID, 1, self.docs[ID], title="first \u2014 Body.")]
         self.assertEqual(self.problems(), [])
+
+    def test_generator_url_must_be_absolute(self):
+        self.manifest_extra = {"generator_url": "https://example.net/src"}
+        self.assertEqual(self.problems(), [])
+        self.manifest_extra = {"generator_url": "github.com/x/y"}
+        self.assertTrue(any("generator_url" in p for p in self.problems()))
+
+    def test_page_without_built_pages_fails(self):
+        self.pages = None
+        self.docs[ID]["page"] = f"t/{ID}/"
+        self.assertTrue(any("no item pages were built" in p for p in self.problems()))
 
     def test_feed_entry_must_have_a_title(self):
         # 0.3 §7: RSS requires it, so publishers MUST emit one.
@@ -344,6 +357,12 @@ class PageTests(SurfaceTests):
         super().setUp()
         self.pages = {"index.html": page(ORIGIN),
                       f"t/{ID}/index.html": page(self.LIVE, "<p>Body.</p>")}
+
+    def test_page_field_names_the_live_page(self):
+        self.docs[ID]["page"] = None
+        self.assertTrue(any("(§5.8)" in p for p in self.problems()))
+        self.docs[ID]["page"] = f"f/{ID}/"
+        self.assertTrue(any("(§5.8)" in p for p in self.problems()))
 
     def pin_v1(self):
         self.ledger[ID]["changelog"][0]["pinned"] = True

@@ -233,7 +233,8 @@ who's read Hugo's own RSS template will already expect to see.
 `[params.blyg].level`, defaulting to `1` when unset. This module only
 accepts `1` — it fails the build on anything else. Level 1 is the
 single-origin protocol, carried into 0.3 from 0.2; the manifest's
-`"blyg": "0.3"` names the spec version, not the level (§3.1). Note the blogroll is optional at *every* level and
+`"blyg": "0.3"` names the spec version, not the level (§3.1), and
+`"generator_url"` points at this repository (§6.1). Note the blogroll is optional at *every* level and
 never changes the level, and generation provenance (§5.7) is L1 — it
 only applies to versions that involved generation.
 
@@ -686,7 +687,9 @@ To turn the item pages off, set `pages = false` under `[params.blyg]`
 go too). Only do that on a site that has never served them with a pin:
 a pinned page, once served, MUST keep returning 200 (§8.4 rule 1). With
 pages off, the feed page shows threads in full, cites pins by their
-JSON files, and runs no stepper.
+JSON files, and runs no stepper; item documents drop their `"page"`
+(§5.8), which otherwise names each item's permalink, origin-relative,
+and feed entries their `<link>`.
 
 ## Generation provenance
 
@@ -743,8 +746,9 @@ included. To write one literally, use Hugo's escaped form,
 
 0.3's grammar for partial transclusions and `[[id]]` links (refused for
 now, see "Content contract"), quoting threads, and its Level 2
-cross-client constructs: the `page` field, stubs, lineage
-(`forked_from`), `cited`, and Webmention. All of them are optional to emit.
+cross-client constructs: stubs, lineage (`forked_from`), `cited`, and
+Webmention. All of them are optional to emit. (The `page` field is built:
+see "HTML pages".)
 
 ## Developing hugo-blyg
 
@@ -772,8 +776,8 @@ fragment, whose v1 is pinned, and fails unless the pinned page's content stays t
 pin's `content_html` throughout, the live page moves with the kind, and
 deleting the pin file fails the build. `surfaces_e2e.sh` builds
 `exampleSite` with pages on and off, and fails unless every protocol
-surface comes out byte-identical, `feed.xml` apart from its entries'
-`<link>`s. `stepper_e2e.sh` serves a build and drives the version
+surface comes out byte-identical, apart from the item documents'
+`"page"` and `feed.xml`'s entries' `<link>`s. `stepper_e2e.sh` serves a build and drives the version
 stepper in headless Chromium through `exampleSite`'s revised fragment
 (v1 and v2 pinned, v3 live), with JavaScript on and off; it needs Node
 and the `playwright` npm package.
