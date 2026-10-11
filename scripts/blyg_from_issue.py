@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Turn a GitHub issue into a new, unstamped content/blyg/*.md fragment.
+"""Turn a GitHub issue into a new, unstamped content/blyg/*.md item: a
+fragment, or a thread when the body quotes an item with a `![[id]]`
+directive, since only threads transclude (§10).
 
 Run by the publish-from-issue action (publish-from-issue/action.yml). The
 issue body becomes the item body verbatim (bar line endings); the issue
@@ -76,12 +78,21 @@ def create_item(content_dir: Path, *, title: str, body: str | None, number: int,
     if body is None or not body.strip():
         raise bs.BlygStampError(f"issue #{number} has an empty body -- nothing to publish")
     path = item_path(content_dir, now, title, number)
+    body = normalize_body(body)
+    kind = item_kind(body)
     front_matter = (f'date = "{bs.iso8601_utc(now)}"\n'
-                    f'blyg_kind = "fragment"\n')
+                    f'blyg_kind = "{kind}"\n')
     content_dir.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as f:
-        f.write(f"+++\n{front_matter}+++\n{normalize_body(body)}")
+        f.write(f"+++\n{front_matter}+++\n{body}")
     return path
+
+
+def item_kind(body: str) -> str:
+    """A fragment, unless the body transcludes: a directive (§10.1) only
+    means anything in a thread, and the stamp refuses one in a fragment.
+    An issue has no other way to say which it is."""
+    return "thread" if bs.find_directives(body) else "fragment"
 
 
 def parse_logins(value: str) -> set[str]:

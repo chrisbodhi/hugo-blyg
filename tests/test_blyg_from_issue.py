@@ -53,6 +53,27 @@ class CreateItemTests(unittest.TestCase):
                          b'+++\ndate = "2026-09-27T14:05:09Z"\nblyg_kind = "fragment"\n'
                          b'+++\nSome *words*.\n')
 
+    def test_a_body_that_transcludes_is_a_thread(self):
+        # Only threads transclude (§10); a fragment with a directive is
+        # refused at stamp time, so the issue would never publish.
+        quoting = self.create(title="quoting", body="Look:\n\n![[0j9ky9btwh7awq88c2q53mz7b6]]\n")
+        self.assertIn('blyg_kind = "thread"', quoting.read_text(encoding="utf-8"))
+        inert = self.create(title="inert", body="Inline ![[0j9ky9btwh7awq88c2q53mz7b6]] is text.\n")
+        self.assertIn('blyg_kind = "fragment"', inert.read_text(encoding="utf-8"))
+
+    def test_a_thread_from_an_issue_stamps_against_its_source(self):
+        self.create(title="source", body="Quoted.")
+        bs.run_stamp(self.content_dir, self.ledger_path, write=True,
+                     now=NOW + datetime.timedelta(seconds=5))
+        [source_id] = json.loads(self.ledger_path.read_text())
+        self.create(title="thread", body=f"Look:\n\n![[{source_id}]]\n> Quoted.\n")
+        plans = bs.run_stamp(self.content_dir, self.ledger_path, write=True,
+                             now=NOW + datetime.timedelta(seconds=10))
+        entry = json.loads(self.ledger_path.read_text())[
+            next(p.blyg_id for p in plans if p.kind == "new")]
+        self.assertEqual((entry["kind"], entry["transclusions"][0]["selection"]),
+                         ("thread", "Quoted."))
+
     def test_title_never_reaches_the_item(self):
         text = self.create(title="Secret headline").read_text(encoding="utf-8")
         self.assertNotIn("Secret headline", text)
