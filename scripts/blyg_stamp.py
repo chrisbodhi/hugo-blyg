@@ -389,7 +389,7 @@ def unsupported_grammar(body: str) -> list[str]:
 
 
 def check_directives(path: Path, body: str, kind: str) -> None:
-    """Grammar-level refusals, independent of what a directive points at:
+    r"""Grammar-level refusals, independent of what a directive points at:
     the reserved `![[id@vN]]` form (§10.1); a directive whose surrounding
     whitespace isn't plain spaces and tabs (DIRECTIVE_RE's `\s` also
     matches e.g. U+00A0, which Markdown and item.html don't strip, so
