@@ -8,7 +8,8 @@
 # it, with no version stepper; and a recorded pin whose file is gone
 # fails the build.
 #
-# Run from anywhere (GNU sed); needs hugo, go and python3 on PATH. CI runs it.
+# Run from anywhere, with GNU or BSD (macOS) sed and grep -- POSIX BRE/ERE
+# only, no GNU escapes; needs hugo, go and python3 on PATH. CI runs it.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -43,7 +44,7 @@ sys.exit(0 if blyg_validate.carries(page, pin) else 1)
 PY
 }
 versions() {  # the version line (p.version-line) of a live page, tags stripped
-  sed -n 's#.*<p class="\?version-line"\?[^>]*>##p' "$1" | sed 's#</p>.*##; s/<[^>]*>//g'
+  sed -En 's#.*<p class="?version-line"?[^>]*>##p' "$1" | sed 's#</p>.*##; s/<[^>]*>//g'
 }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -72,13 +73,14 @@ frozen || fail "a kind change changed the pinned page"
   || fail "live page didn't move to t/"
 grep -q "url=https://example.org/blyg/t/$id/" "public/blyg/f/$id/index.html" \
   || fail "the old f/ permalink doesn't redirect to t/"
-grep -q "rel=\"\\?canonical\"\\? href=\"\\?https://example.org/blyg/t/$id/" "$pinned" \
+grep -qE "rel=\"?canonical\"? href=\"?https://example.org/blyg/t/$id/" "$pinned" \
   || fail "the pinned page isn't canonical to the moved live page"
 echo "ok: a kind change moves the live page and leaves a redirect"
 
 # 3. Withdrawal: the live page says so, the pinned page survives (§8.4 rule 1).
-sed -i.bak 's/^blyg_kind = "thread"$/blyg_kind = "thread"\nblyg_withdrawn = true/' "$md" \
-  && rm "$md.bak"
+sed -i.bak '/^blyg_kind = "thread"$/a\
+blyg_withdrawn = true
+' "$md" && rm "$md.bak"
 stamp
 build
 frozen || fail "withdrawal changed the pinned page"
@@ -86,7 +88,7 @@ grep -q "This item was withdrawn" "public/blyg/t/$id/index.html" \
   || fail "the live page doesn't say the item was withdrawn"
 [ "$(versions public/blyg/t/$id/index.html)" = "v4 · pinned: v1" ] \
   || fail "the endcap doesn't still cite its pin"
-! grep -q 'data-item\|version-nav' "public/blyg/t/$id/index.html" \
+! grep -qE 'data-item|version-nav' "public/blyg/t/$id/index.html" \
   || fail "the version stepper would run on a withdrawn item's endcap"
 echo "ok: a withdrawn item keeps its pinned page"
 

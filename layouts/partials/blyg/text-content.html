@@ -1,0 +1,18 @@
+{{- /*
+  §10.2's text content of some content_html -- what a partial
+  transclusion's selection must be a substring of:
+
+    {{ $text := partial "blyg/text-content.html" $html }}
+
+  Tags stripped, whitespace collapsed within a block, block boundaries
+  kept as line breaks. scripts/blyg_validate.py's text_content is the
+  same rule, step for step; the whitespace classes are spelled out
+  because RE2's \s and Python's differ.
+*/ -}}
+{{- $h := replaceRE `[ \t\n\r\f\v]+` " " . -}}
+{{- $h = replaceRE `(?i)<br\b[^>]*>|</?(?:p|div|li|h[1-6]|blockquote|pre|tr|td|th|dt|dd|figcaption|ul|ol|dl|table|hr|section|article|header|footer|figure|details|summary)\b[^>]*>` "\n" $h -}}
+{{- $h = replaceRE `<[^>]*>` "" $h -}}
+{{- $h = htmlUnescape $h -}}
+{{- $h = replaceRE `[ \t\r\f\v]+` " " $h -}}
+{{- $h = replaceRE ` ?\n[ \n]*` "\n" $h -}}
+{{- return trim $h " \n" -}}

@@ -1,7 +1,7 @@
 # hugo-blyg
 
 A Hugo Module that builds the static publish-side surfaces of the
-[Blygger protocol](https://github.com/blygger/blygger-spec) v0.2, Level 1
+[Blygger protocol](https://blygger.org/spec/0.3/) v0.3, Level 1 or 2
 — `blyg.json` (manifest), `feed.xml`, `items/index.json` (archive index),
 `items/{id}.json` (canonical item documents), and, optionally,
 `blogroll.opml` (§11) — plus human-readable HTML pages for the feed,
@@ -115,7 +115,7 @@ own head, header, navigation and styles. Two optional touches in its
 {{ partial "blyg/head.html" . }}
 ```
 
-**CORS.** Protocol v0.2 §4 (SHOULD): public JSON/XML responses SHOULD
+**CORS.** Protocol v0.3 §4 (SHOULD): public JSON/XML responses SHOULD
 carry permissive CORS (`Access-Control-Allow-Origin: *`), since
 cross-origin reading by other clients depends on it. On Apache, this
 ships with the module as `static/blyg/.htaccess` — Hugo mounts an
@@ -208,22 +208,36 @@ who's read Hugo's own RSS template will already expect to see.
   that just means "not published yet"; after, it would 404 a published
   item, so the stamp script refuses it and the build fails on the
   orphaned ledger entry. Withdrawal is the only exit (§9).
-- `title` is never read. The item document schema (§5) has no title
-  field at all — fragments and threads are microblog-style, not
-  headlined essays. A feed entry's `<title>` is that publish event's
-  changelog **note**, when it has one: §7 says an entry "keeps its own
-  `blyg:version` and note", and the spec's own example carries the note
-  in `<title>`. The withdrawal event of a currently-withdrawn item is
-  titled `withdrawn`, literally, as §7 requires by name.
+- `title` is never read. Items are titleless (§5.3) — fragments and
+  threads are microblog-style, not headlined essays. A feed entry's
+  `<title>`, which every entry MUST carry (§7), is derived as §7
+  RECOMMENDS: that publish event's changelog **note**, an em dash, and
+  the first 80 or so characters of the item's latest text
+  (`note — excerpt`), or the excerpt alone when the event has no note.
+  The withdrawal event of a currently-withdrawn item is titled
+  `withdrawn`, literally, as §7 requires by name.
+- An inline `[[id]]` outside code is a plain internal link (§10.1): it
+  renders as a link to that item's page, resolved when the stamp script
+  runs, and an id it can't resolve is a publish error. Put it in
+  backticks or a code fence to keep it as text. See "Transclusion" for
+  quoting part of an item instead.
+- A changelog note describes a change; it never reproduces withheld
+  content (§5.2). Where the previous version isn't pinned, a note MUST
+  NOT quote its text — nothing can check that, so it's on the author.
 
 ## Conformance level
 
 `blyg.json`'s `"level"` field (§3) comes from the consuming site's own
-`[params.blyg].level`, defaulting to `1` when unset. This module only
-accepts `1` — it fails the build on anything else. L2's real constructs
-(stub metadata, thread nesting, `forked_from`, webmention) arrive with
-protocol 0.3 and none are built, so a higher level would be a false
-conformance claim. Note the blogroll is optional at *every* level and
+`[params.blyg].level`, defaulting to `1` when unset. This module
+accepts `1` or `2` and fails the build on anything else. Level 1 is the
+single-origin protocol, carried into 0.3 from 0.2. A publisher conforms
+at Level 2 by following its rules for whatever L2 constructs it emits
+(§3): this module emits `page` (§5.8) and enforces the local closure
+check on nested quotes (§10.2), and never quotes another origin, stubs
+or forks, so `2` is an honest claim too, and Webmention is optional at
+every level (§15.7). The manifest's
+`"blyg": "0.3"` names the spec version, not the level (§3.1), and
+`"generator_url"` points at this repository (§6.1). Note the blogroll is optional at *every* level and
 never changes the level, and generation provenance (§5.7) is L1 — it
 only applies to versions that involved generation.
 
@@ -374,7 +388,9 @@ to force the write, discarding the value.
 
 ## Absolute URLs in `content_html`
 
-The protocol requires `content_html` to be self-contained (§7). Render
+The protocol requires every URL in `content_html` to be absolute (§5.2),
+since the same bytes travel as the feed `<description>`, into other
+readers' stores, and into other origins' threads. Render
 hooks on the markdown image/link AST aren't enough on their own if the
 consuming site has shortcodes that inject raw HTML with root-relative
 URLs outside those AST nodes entirely (a real case in the site this was
@@ -387,8 +403,14 @@ Hugo's regex engine (RE2) has none. The attribute list also covers
 `poster`, `cite`, `action` and friends, and two more passes handle every
 candidate inside `srcset` and `url(...)` in inline styles. This catches
 shortcode-injected markup and ordinary markdown images/links in one pass, so no render hooks are
-needed. Page-relative URLs (`other/page`) can't be rewritten — an item
-has no page of its own to be relative to — so
+needed. An in-document anchor (`#fn:1`, a footnote) is made absolute
+against the item's own page, `f/{id}/` or `t/{id}/` — the same URL with
+pages on or off, so `content_html` doesn't depend on that setting — and
+a fragment quoted into a thread keeps its anchors pointing at the
+fragment's page, exactly as in its own `content_html`. All of it lives
+in `partials/blyg/absolute-urls.html`. Page-relative URLs (`other/page`)
+can't be rewritten — they'd resolve against whichever page showed the
+item — so
 `scripts/blyg_validate.py` fails the build on them, and on anything
 else the rewrite can't make self-contained.
 
@@ -403,8 +425,8 @@ immutable, and §5.4 requires that of a media URL.
 
 ## Transclusion
 
-A thread quotes one of the site's own fragments with a line consisting
-solely of its id in a directive (§10.1):
+A thread quotes one of the site's own items, a fragment or another
+thread, with a line consisting solely of its id in a directive (§10.1):
 
 ```md
 Something worth quoting:
@@ -416,18 +438,40 @@ The same text inline, or inside a fenced code block, is inert. The
 whitespace around a directive must be spaces and tabs: anything else
 (a non-breaking space, say) is refused at stamp time, since Markdown
 wouldn't read the line as a block of its own. Only
-threads transclude, only same-origin fragments can be transcluded (0.2 is
-local-only), and the reserved `![[id@vN]]` form is refused.
+threads transclude, only this site's own items can be transcluded
+(0.3 allows other origins' items too, which this module doesn't build),
+and the reserved `![[id@vN]]` form is refused.
+
+**Partial transclusion.** A blockquote directly under the directive, no
+blank line between, quotes just that text (§10.1):
+
+```md
+![[5cx94j6wbmzrdnnjxvs9j1nkba]]
+> a root-relative link and an image from the
+> origin’s media directory
+```
+
+It bakes as `<blockquote class="blyg-transclusion blyg-partial" …>` with
+the selection as plain text, one `<p>` per paragraph of it, and the
+thread's `transclusions` entry carries a `selector` with the exact text
+(§10.3). The selection has to appear in the source's rendered text
+exactly — soft line breaks don't matter, but the typographer's curly
+quotes do (`origin’s`, not `origin's`) — or the build fails (§10.2): the
+stamp script works from Markdown, so only the build can check. A blank
+line between the directive and the blockquote quotes the whole item,
+followed by your own blockquote, and a quote has to end with a blank
+line.
 
 **Resolution happens in `blyg_stamp.py`, at publish time, never in the
 build.** Hugo rebuilds everything on every deploy, so a template that
-resolved `![[id]]` against the fragment's current page would silently
-rewrite every thread quoting it whenever the fragment changed — a
+resolved `![[id]]` against the source's current page would silently
+rewrite every thread quoting it whenever the source changed — a
 same-version stealth edit (§13.3), and exactly the cascade §10.4 forbids.
 Instead, whenever the stamp script creates a thread version, it resolves
 each directive to the target's latest published version (after this same
-run, so editing a fragment and the thread quoting it together bakes the
-new version) and stores the snapshot in the thread's ledger entry:
+run, so editing a source and the thread quoting it together bakes the
+new version: fragments are planned first, then each thread after the
+threads it quotes) and stores the snapshot in the thread's ledger entry:
 
 ```json
 "transclusions": [
@@ -436,28 +480,38 @@ new version) and stores the snapshot in the thread's ledger entry:
 ]
 ```
 
-A directive that doesn't resolve to a currently-published fragment
-(unknown id, draft, withdrawn, a thread) is a publish error. An
+A quoted thread's snapshot also carries `"kind": "thread"` and the
+snapshots of the version it quotes, nested, since its `content_html`
+bakes them: nesting is nested blockquotes (§10.2). Only the direct quote
+is the quoting thread's provenance (§10.3).
+
+A directive that doesn't resolve to a currently-published item (unknown
+id, draft, withdrawn) is a publish error, and so is one that breaks
+§10.2's closure check: a thread can't quote itself, or a thread that
+quotes it at any depth. An
 unchanged thread is never re-resolved: later edits, withdrawal or
-pinning of the fragment leave it alone until the thread itself is
+pinning of the source leave it alone until the thread itself is
 republished, which re-resolves every directive to the then-latest
 versions. A withdrawn thread's snapshots are dropped (§9), and
 `--amend` reverting a thread restores exactly the snapshots that shipped.
 The one exception to "never re-resolved": if `--amend` undoes or rewrites
-an unshipped fragment version that a thread baked, the thread's own
+an unshipped source version that a thread baked, the thread's own
 unshipped version is amended in the same run to re-resolve, since its
 provenance would otherwise name a version that no longer exists, or
 exists with other content (§10.3). `blyg_validate.py` backs that up by
-checking every baked `{id, version}` against the fragment's changelog.
+checking every baked `{id, version}` against the source's changelog.
+That covers a thread quoting a thread quoting a fragment, too: the
+fragment's revert re-resolves the inner thread, and that the outer one.
 
-`item.html` bakes each snapshot where its directive line was, as
+`bake.html` bakes each snapshot where its directive line was, as
 `<blockquote class="blyg-transclusion" data-blyg-id="…"
 data-blyg-version="…">…</blockquote>` with no link inside, rendering the
-stored `content_md` in the **fragment's own page context**. That is the
-same rendering that produced the fragment's `content_html` (verified
+stored `content_md` in the **source's own page context** (and, for a
+quoted thread, baking its nested snapshots the same way). That is the
+same rendering that produced the source's `content_html` (verified
 byte-identical against Hugo 0.151.0, shortcodes and footnotes included),
 and `blyg_validate.py` checks it byte for byte wherever that version's
-HTML is still on the wire: the fragment's live document while it sits at
+HTML is still on the wire: the source's live document while it sits at
 the baked version, or a pin. The item document's `transclusions` is the
 `{id, version}` provenance, in directive order.
 
@@ -631,7 +685,7 @@ metadata block), and each `time` element carries its ISO 8601 timestamp.
 On the feed page an `<hr>` sits between items, so they read apart
 without a stylesheet; `.blyg > hr { display: none }` hides it.
 `.stub-cite`, the reference client's "In response to" line, will sit
-above an item's `div.item-content` once protocol 0.3's stubs are built.
+above an item's `div.item-content` once this module builds stubs (§10.6).
 
 To change what the pages say, override a partial in the site's own
 `layouts/partials/blyg/view/`. Each piece is its own, so a site can
@@ -666,7 +720,9 @@ To turn the item pages off, set `pages = false` under `[params.blyg]`
 go too). Only do that on a site that has never served them with a pin:
 a pinned page, once served, MUST keep returning 200 (§8.4 rule 1). With
 pages off, the feed page shows threads in full, cites pins by their
-JSON files, and runs no stepper.
+JSON files, and runs no stepper; item documents drop their `"page"`
+(§5.8), which otherwise names each item's permalink, origin-relative,
+and feed entries their `<link>`.
 
 ## Generation provenance
 
@@ -721,8 +777,11 @@ included. To write one literally, use Hugo's escaped form,
 
 ## Not yet built
 
-Nothing on the 0.2 publish side. L2's constructs (stub metadata, thread
-nesting, `forked_from`, webmention) arrive with protocol 0.3.
+0.3's cross-origin constructs: quoting other origins' items, stubs,
+lineage (`forked_from`), `cited`, and Webmention — Level 2's business,
+all optional to emit. Everything 0.3 adds within one origin is built:
+nested and partial transclusion, `[[id]]` links, `page` and
+`generator_url`.
 
 ## Developing hugo-blyg
 
@@ -744,14 +803,16 @@ builds what's in front of you. CI runs all of these, and also checks that
 an unstamped body edit fails `hugo`. `transclusion_e2e.sh` edits and then
 withdraws the fragment that `exampleSite`'s transcluding thread quotes,
 rebuilding each time, and fails unless the thread's built `content_html`
-stays byte-identical until the thread is itself re-stamped.
+stays byte-identical until the thread is itself re-stamped; then it adds
+a thread quoting that thread, and checks the nested bake and the closure
+check.
 `pages_e2e.sh` edits, re-kinds and withdraws `exampleSite`'s first
 fragment, whose v1 is pinned, and fails unless the pinned page's content stays the
 pin's `content_html` throughout, the live page moves with the kind, and
 deleting the pin file fails the build. `surfaces_e2e.sh` builds
 `exampleSite` with pages on and off, and fails unless every protocol
-surface comes out byte-identical, `feed.xml` apart from its entries'
-`<link>`s. `stepper_e2e.sh` serves a build and drives the version
+surface comes out byte-identical, apart from the item documents'
+`"page"` and `feed.xml`'s entries' `<link>`s. `stepper_e2e.sh` serves a build and drives the version
 stepper in headless Chromium through `exampleSite`'s revised fragment
 (v1 and v2 pinned, v3 live), with JavaScript on and off; it needs Node
 and the `playwright` npm package.

@@ -3,8 +3,9 @@
 # surface. Builds exampleSite/ with [params.blyg] pages on and off and
 # requires every file under blyg/ other than the pages themselves and the
 # version stepper's script -- blyg.json, items/index.json, items/*.json,
-# the pins, blogroll.opml, media -- to be byte-identical, and feed.xml to
-# be byte-identical apart from each entry's <link> to its item's page (§7).
+# the pins, blogroll.opml, media -- to be byte-identical, apart from the
+# two places the protocol names the page: each live item document's
+# "page" (§5.8), and each feed.xml entry's <link> (§7).
 #
 # Run from anywhere; needs hugo, go and python3 on PATH. CI runs it.
 set -euo pipefail
@@ -34,6 +35,13 @@ def unlinked(feed):
                   lambda m: re.sub(rb"\s*<link>[^<]*</link>", b"", m.group(0)),
                   feed, flags=re.S)
 
+# A live item document (not index.json, not a pin under items/{id}/).
+PAGE_FIELD = re.compile(r"^items/(?!index\.json$)[^/]+\.json$")
+
+def unpaged(doc):
+    """An item document without its "page" (sorted after "origin")."""
+    return re.sub(rb',"page":"[^"]*"', b"", doc)
+
 problems = []
 have, want = surfaces(on), surfaces(off)
 for name in sorted(have ^ want):
@@ -45,6 +53,11 @@ for name in sorted(have & want):
             problems.append("feed.xml: differs by more than its entries' <link>s")
         if unlinked(a) == a:
             problems.append("feed.xml: no entry links its page with pages on")
+    elif PAGE_FIELD.match(name):
+        if unpaged(a) != b:
+            problems.append(f"{name}: differs by more than its \"page\"")
+        if unpaged(a) == a:
+            problems.append(f"{name}: no \"page\" with pages on (§5.8)")
     elif a != b:
         problems.append(f"{name}: differs with pages on and off")
 for p in problems:
@@ -54,5 +67,5 @@ if problems:
 for name in ("blyg.json", "items/index.json", "feed.xml"):
     assert name in have, name
 print(f"ok: {len(have)} surface files are the same with pages on and off "
-      f"(feed.xml apart from its entries' <link>s)")
+      f"(item documents apart from \"page\", feed.xml from its entries' <link>s)")
 PY

@@ -1,0 +1,42 @@
+{{- /*
+  Makes every URL in rendered HTML absolute, as content_html requires
+  (§5.2, decision #53: the same bytes travel as the feed <description>,
+  into importers' stores and into other origins' threads, with no origin
+  to resolve against):
+
+    {{ $html = partial "blyg/absolute-urls.html" (dict "html" $html "base" $base "page" $page) }}
+
+  Inputs:
+    html -- the rendered HTML.
+    base -- the site's base URL, without a trailing slash.
+    page -- the absolute URL of the page the HTML belongs to, which an
+            in-document "#..." anchor (a footnote, its backlink) is made
+            relative to.
+
+  Render hooks alone don't cover shortcodes that emit raw HTML with
+  root-relative URLs (an <img> whose src went through relURL, an
+  injected <script src="/js/...">), so this rewrites the fully rendered
+  HTML directly: every root-relative or "#..." URL attribute (either
+  quote style), every candidate inside srcset, and url(...) in inline
+  styles. RE2 (Hugo's regex engine) has no lookahead, hence capturing-
+  and-replaying the char after the slash rather than a negative
+  lookahead, to skip protocol-relative "//" URLs without one.
+  Page-relative URLs can't be rewritten at all (they'd resolve against
+  whichever page happened to show the item); scripts/blyg_validate.py
+  fails the build on any that remain. Already-absolute URLs are left
+  alone, so running this twice changes nothing.
+*/ -}}
+{{- $base := .base -}}
+{{- $html := .html -}}
+{{- $attrs := `(\s(?:src|href|poster|cite|action|formaction|data|background|longdesc))=(["'])` -}}
+{{- $html = replaceRE (printf "%s/([^/\"'])" $attrs) (printf "${1}=${2}%s/${3}" $base) $html -}}
+{{- $html = replaceRE (printf "%s#" $attrs) (printf "${1}=${2}%s#" .page) $html -}}
+{{- $html = replaceRE `url\((["']?)/([^/"')])` (printf "url(${1}%s/${2}" $base) $html -}}
+{{- range findRESubmatch `\ssrcset=(["'])([^"']*)["']` $html -}}
+  {{- $value := index . 2 -}}
+  {{- $fixed := replaceRE `(^|,)(\s*)/([^/])` (printf "${1}${2}%s/${3}" $base) $value -}}
+  {{- if ne $fixed $value -}}
+    {{- $html = replace $html (index . 0) (replace (index . 0) $value $fixed) -}}
+  {{- end -}}
+{{- end -}}
+{{- return $html -}}

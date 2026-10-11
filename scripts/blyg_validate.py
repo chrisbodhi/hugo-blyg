@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Validate a built blyg surface (public/blyg/) against the ledger and
-blygger-spec docs/protocol-v0.2.md (pinned at c5884b9).
+blygger-spec docs/protocol-v0.3.md (pinned at 80c8d65).
 
 This is the build-side half of docs/conformance.md: everything
 scripts/blyg_stamp.py can't see because Hugo produces it -- the rendered
@@ -35,6 +35,7 @@ BLYG_NS = "https://blygger.org/ns/0.1"
 ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 GUID_RE = re.compile(r"^blyg:(" + bs.BLYG_ID_RE_SRC + r"):v([1-9][0-9]*)$")
 PIN_RE = re.compile(r"^v([1-9][0-9]*)\.json$")
+ABSOLUTE_URL_RE = re.compile(r"^https?://[^\s/]+\S*$")
 FEED_WINDOW = 50
 
 # Attributes whose value is one URL, and the subset that embeds media.
@@ -63,8 +64,14 @@ class _HTMLCollector(html.parser.HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.refs: list[tuple[str, str, str]] = []  # (tag, attr, url)
-        # (data-blyg-id, data-blyg-version) of every §10.2 wrapper, in order
-        self.transclusions: list[tuple[str | None, str | None]] = []
+        # (data-blyg-id, data-blyg-version, blyg-partial?) of every
+        # top-level §10.2 wrapper, in order -- not those nested in a quoted
+        # thread's bake, which are that thread's provenance, not this
+        # version's (§10.2)
+        self.transclusions: list[tuple[str | None, str | None, bool]] = []
+        # each top-level partial wrapper's <p> texts, in order (§10.2)
+        self.partial_lines: list[list[str]] = []
+        self._in_partial_p = False
         # blyg-tk-gen wrappers (§5.7) outside any transclusion: this
         # version's own generated spans, not ones quoted with a fragment
         self.generated = 0
@@ -73,15 +80,30 @@ class _HTMLCollector(html.parser.HTMLParser):
     def handle_endtag(self, tag):
         if tag == "blockquote" and self._blockquotes:
             self._blockquotes.pop()
+        if tag == "p":
+            self._in_partial_p = False
+
+    def handle_data(self, data):
+        if self._in_partial_p:
+            self.partial_lines[-1][-1] += data
 
     def handle_starttag(self, tag, attrs):
         classes = (dict(attrs).get("class") or "").split()
         if tag == "blockquote":
             a = dict(attrs)
             quoted = "blyg-transclusion" in classes
+            nested = any(self._blockquotes)
             self._blockquotes.append(quoted)
-            if quoted:
-                self.transclusions.append((a.get("data-blyg-id"), a.get("data-blyg-version")))
+            if quoted and not nested:
+                partial = "blyg-partial" in classes
+                self.transclusions.append((a.get("data-blyg-id"), a.get("data-blyg-version"),
+                                           partial))
+                if partial:
+                    self.partial_lines.append([])
+        if tag == "p" and len(self._blockquotes) == 1 and self._blockquotes[0] \
+                and self.transclusions and self.transclusions[-1][2]:
+            self._in_partial_p = True
+            self.partial_lines[-1].append("")
         if tag in ("span", "div") and "blyg-tk-gen" in classes and not any(self._blockquotes):
             self.generated += 1
         for name, value in attrs:
@@ -108,8 +130,9 @@ def _collect(content_html: str) -> _HTMLCollector:
 
 def check_content_html(where: str, content_html: str, origin: str,
                        public_blyg: Path, problems: Problems) -> None:
-    """§7: <description> HTML MUST be self-contained -- absolute media
-    URLs, no dependence on the origin's stylesheets or scripts -- and
+    """§5.2/§7: content_html MUST be self-contained -- every URL in it
+    absolute, footnote anchors included (0.3, decision #53), and no
+    dependence on the origin's stylesheets or scripts -- and
     §5.4: media MUST be immutable, which only files under the origin's
     media/ directory are held to (scripts/blyg_stamp.py)."""
     collector = _collect(content_html)
@@ -117,15 +140,13 @@ def check_content_html(where: str, content_html: str, origin: str,
     media_prefix = origin + "media/"
 
     for tag, attr, url in collector.refs:
-        if url == "" or url.startswith("#"):
-            continue  # in-document anchors (footnotes) travel with the HTML
         lowered = url.lower()
         if lowered.startswith("//"):
             url = "https:" + url
             lowered = url.lower()
         if not lowered.startswith(SAFE_SCHEMES):
             problems.add(where, f"<{tag} {attr}> has non-absolute URL {url!r} -- "
-                                f"content_html MUST be self-contained (§7)")
+                                f"every URL in content_html MUST be absolute (§5.2)")
             continue
         parts = urlsplit(url)
         on_origin = parts.netloc == origin_host
@@ -150,15 +171,18 @@ def check_manifest(public_blyg: Path, problems: Problems) -> dict | None:
     except (OSError, ValueError) as exc:
         problems.add("blyg.json", f"unreadable: {exc}")
         return None
-    expect = {"blyg": "0.2", "feed": "feed.xml", "items": "items/index.json"}
+    expect = {"blyg": "0.3", "feed": "feed.xml", "items": "items/index.json"}
     for key, value in expect.items():
         if manifest.get(key) != value:
             problems.add("blyg.json", f"{key} is {manifest.get(key)!r}, expected {value!r}")
-    if manifest.get("level") != 1:
-        problems.add("blyg.json", f"level is {manifest.get('level')!r}; only 1 is built")
+    if manifest.get("level") not in (1, 2) or isinstance(manifest.get("level"), bool):
+        problems.add("blyg.json", f"level is {manifest.get('level')!r}; only 1 and 2 are built")
     for key in ("generator", "site", "title"):
         if not isinstance(manifest.get(key), str) or not manifest[key]:
             problems.add("blyg.json", f"missing {key}")
+    if "generator_url" in manifest and not ABSOLUTE_URL_RE.match(str(manifest["generator_url"])):
+        problems.add("blyg.json", f"generator_url {manifest['generator_url']!r} isn't one "
+                                  f"absolute URL (§6.1)")
     if not str(manifest.get("site", "")).endswith("/"):
         problems.add("blyg.json", "site must be the origin base URL, ending in /")
     if not is_iso_z(manifest.get("updated")):
@@ -280,14 +304,14 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
         problems.add(where, f"not JSON: {exc}")
         return None
 
-    if doc.get("blyg") != "0.2":
-        problems.add(where, f"blyg is {doc.get('blyg')!r}, expected '0.2'")
+    if doc.get("blyg") != "0.3":
+        problems.add(where, f"blyg is {doc.get('blyg')!r}, expected '0.3'")
     if doc.get("id") != blyg_id or not bs.is_valid_blyg_id(str(doc.get("id"))):
         problems.add(where, f"id {doc.get('id')!r} doesn't match file name / isn't a blyg id")
     if doc.get("origin") != origin:
         problems.add(where, f"origin {doc.get('origin')!r} != manifest site {origin!r}")
     if "forked_from" in doc:
-        problems.add(where, "carries 'forked_from', reserved for L2 (§5.6)")
+        problems.add(where, "carries 'forked_from', which hugo-blyg never emits (§5.6)")
 
     kind = doc.get("kind")
     withdrawn = bool(entry.get("withdrawn"))
@@ -295,7 +319,7 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
     if kind != expected_kind:
         problems.add(where, f"kind {kind!r}, ledger says {expected_kind!r}")
     if kind not in ("fragment", "thread", "withdrawn"):
-        problems.add(where, f"kind {kind!r} is not a 0.2 kind (§5.3)")
+        problems.add(where, f"kind {kind!r} is not a 0.3 kind (§5.3)")
 
     version = doc.get("version")
     if version != entry.get("version"):
@@ -333,13 +357,13 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
         problems.add(where, "content_hash != ledger last_hash (unstamped edit?)")
 
     is_thread = entry.get("kind") == "thread"
-    baked = [] if withdrawn else [{"id": t.get("id"), "version": t.get("version")}
-                                  for t in entry.get("transclusions", [])]
+    baked = [] if withdrawn else [provenance(t) for t in entry.get("transclusions", [])]
     if is_thread:
         if doc.get("transclusions") != baked:
             problems.add(where, f"transclusions {doc.get('transclusions')!r} != the "
                                 f"ledger's baked {baked!r} -- threads MUST carry "
-                                f"{{id, version}} in directive order, [] for an endcap (§10.3)")
+                                f"{{id, version, selector?}} in directive order, [] for an "
+                                f"endcap (§10.3)")
     elif "transclusions" in doc:
         problems.add(where, "fragments MUST omit transclusions (§10.3)")
 
@@ -373,6 +397,19 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
         problems.add(where, f"content_md's directives {[d[2] for d in directives]} don't match "
                             f"transclusions {[t['id'] for t in baked]} -- every directive "
                             f"MUST resolve, in directive order (§10.2, §10.3)")
+    try:
+        bs.selections(content_md)
+    except ValueError as exc:
+        problems.add(where, f"content_md: a partial transclusion's {exc} (§10.1)")
+    links = entry.get("links", [])
+    if [link.get("id") for link in links] != bs.find_links(content_md):
+        problems.add(where, f"content_md links {bs.find_links(content_md)} but the ledger "
+                            f"resolved {[link.get('id') for link in links]} -- every [[id]] "
+                            f"link MUST resolve (§10.1)")
+    for link in links:
+        if f'href="{origin}{link.get("page")}"' not in content_html:
+            problems.add(where, f"[[{link.get('id')}]] isn't rendered as an anchor to "
+                                f"{origin}{link.get('page')} (§10.1)")
     check_content_html(where, content_html, origin, public_blyg, problems)
     collected = _collect(content_html)
     if collected.generated != len(doc.get("generated", [])):
@@ -380,11 +417,19 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
                             f"blyg-tk-gen, but generated lists {len(doc.get('generated', []))} "
                             f"-- one entry per span (§5.7)")
     wrappers = collected.transclusions
-    want = [(t["id"], str(t["version"])) for t in baked]
+    want = [(t["id"], str(t["version"]), "selector" in t) for t in baked]
     if is_thread and wrappers != want:
         problems.add(where, f"content_html bakes {wrappers} but transclusions says {want} -- "
                             f"each directive is baked as <blockquote class=\"blyg-transclusion\" "
-                            f"data-blyg-id data-blyg-version> (§10.2)")
+                            f"data-blyg-id data-blyg-version>, a partial one with the "
+                            f"blyg-partial class too (§10.2)")
+    elif is_thread:
+        exact = [t["selector"]["exact"] for t in baked if "selector" in t]
+        got = ["\n".join(lines) for lines in collected.partial_lines]
+        if got != exact:
+            problems.add(where, f"partial transclusions bake {got!r} but their selectors "
+                                f"say {exact!r} -- the bake is the selection's plain text, "
+                                f"one <p> per line (§10.2)")
     elif not is_thread and wrappers:
         problems.add(where, "a fragment's content_html carries blyg-transclusion blockquotes (§10)")
     for m in media:
@@ -398,25 +443,56 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
     return doc
 
 
-def wrapper(blyg_id: str, version: int, fragment_html: str) -> str:
+def provenance(snapshot: dict) -> dict:
+    """A ledger snapshot's §10.3 entry: {id, version}, and a partial
+    transclusion's text-quote selector."""
+    t = {"id": snapshot.get("id"), "version": snapshot.get("version")}
+    if "selection" in snapshot:
+        t["selector"] = {"exact": snapshot["selection"]}
+    return t
+
+
+BLOCK_TAG_RE = re.compile(
+    r"(?i)<br\b[^>]*>|</?(?:p|div|li|h[1-6]|blockquote|pre|tr|td|th|dt|dd|figcaption|ul|ol|dl"
+    r"|table|hr|section|article|header|footer|figure|details|summary)\b[^>]*>")
+
+
+def text_content(content_html: str) -> str:
+    """§10.2's text content -- tags stripped, whitespace collapsed within a
+    block, block boundaries kept as line breaks. The same steps as
+    partials/blyg/text-content.html, which the build checks with."""
+    h = re.sub(r"[ \t\n\r\f\v]+", " ", content_html)
+    h = BLOCK_TAG_RE.sub("\n", h)
+    h = re.sub(r"<[^>]*>", "", h)
+    h = html.unescape(h)
+    h = re.sub(r"[ \t\r\f\v]+", " ", h)
+    h = re.sub(r" ?\n[ \n]*", "\n", h)
+    return h.strip(" \n")
+
+
+def wrapper(blyg_id: str, version: int, source_html: str) -> str:
     return (f'<blockquote class="blyg-transclusion" data-blyg-id="{blyg_id}" '
-            f'data-blyg-version="{version}">{fragment_html}</blockquote>')
+            f'data-blyg-version="{version}">{source_html}</blockquote>')
 
 
 def check_snapshots(public_blyg: Path, ledger: dict, docs: dict, problems: Problems) -> None:
     """§10.3: provenance names "the exact versions baked", so each one must
-    be a version its source actually published as a fragment -- the
-    ledger's changelog records every version's kind. (An --amend that
-    undid or rewrote an unshipped source version is what could break
-    that; blyg_stamp.py re-resolves such threads, and this is the check
-    behind it.)
+    be a version its source actually published with content -- the
+    ledger's changelog records every version's kind, and an endcap has
+    none to quote. (An --amend that undid or rewrote an unshipped source
+    version is what could break that; blyg_stamp.py re-resolves such
+    threads, and this is the check behind it.)
 
-    §10.2: a baked snapshot is the fragment's rendered HTML at the baked
-    version. The template renders it from the ledger's stored content_md
-    rather than copying bytes, so wherever that version's content_html is
-    still on the wire -- the fragment's live document, or a pin -- the
-    baked copy must match it exactly. (A later fragment version leaves
-    nothing to compare against; that's §10.4 working, not a problem.)"""
+    §10.2: a baked snapshot is the source's rendered HTML at the baked
+    version -- a thread's with its own quotes baked inside, nested. The
+    template renders it from the ledger's stored content_md rather than
+    copying bytes, so wherever that version's content_html is still on
+    the wire -- the source's live document, or a pin -- the baked copy
+    must match it exactly. (A later source version leaves nothing to
+    compare against; that's §10.4 working, not a problem.)
+
+    And §10.2's closure check, as it stands on the wire: no thread
+    quotes itself, directly or through other local threads."""
     for thread_id, doc in sorted(docs.items()):
         if doc.get("kind") != "thread":
             continue
@@ -429,14 +505,15 @@ def check_snapshots(public_blyg: Path, ledger: dict, docs: dict, problems: Probl
                              f"transcludes {fid} v{version}, a version {fid} has never "
                              f"published (§10.3)")
                 continue
-            if published[version] != "fragment":
+            if published[version] not in ("fragment", "thread"):
                 problems.add(f"items/{thread_id}.json",
                              f"transcludes {fid} v{version}, which was published as "
-                             f"{published[version]!r}, not a fragment (§10.2)")
+                             f"{published[version]!r}, with no content to quote (§10.2)")
                 continue
             source = docs.get(fid)
             reference = None
-            if source and source.get("kind") == "fragment" and source.get("version") == version:
+            if source and source.get("kind") == published[version] \
+                    and source.get("version") == version:
                 reference = source.get("content_html")
             else:
                 pin = public_blyg / "items" / str(fid) / f"v{version}.json"
@@ -445,10 +522,28 @@ def check_snapshots(public_blyg: Path, ledger: dict, docs: dict, problems: Probl
                         reference = json.loads(pin.read_text(encoding="utf-8")).get("content_html")
                     except ValueError:
                         pass  # check_pins reports it
-            if reference is not None and wrapper(fid, version, reference) not in doc.get("content_html", ""):
+            if reference is not None and "selector" in t:
+                if t["selector"].get("exact") not in text_content(reference):
+                    problems.add(f"items/{thread_id}.json",
+                                 f"quotes {t['selector'].get('exact')!r} from {fid} v{version}, "
+                                 f"which isn't in that version's text (§10.2)")
+            elif reference is not None and wrapper(fid, version, reference) not in doc.get("content_html", ""):
                 problems.add(f"items/{thread_id}.json",
                              f"the baked snapshot of {fid} v{version} isn't byte-identical to "
                              f"that version's own content_html (§10.2)")
+
+    quotes = {i: [t.get("id") for t in d.get("transclusions") or []] for i, d in docs.items()}
+    for thread_id in sorted(quotes):
+        seen, todo = set(), list(quotes[thread_id])
+        while todo:
+            i = todo.pop()
+            if i not in seen:
+                seen.add(i)
+                todo.extend(quotes.get(i, []))
+        if thread_id in seen:
+            problems.add(f"items/{thread_id}.json",
+                         "quotes itself, directly or through other threads -- a thread "
+                         "MUST NOT transclude one that transcludes it (§10.2)")
 
 
 def check_index(public_blyg: Path, ledger: dict, docs: dict, problems: Problems) -> None:
@@ -638,6 +733,21 @@ def pages_built(public_blyg: Path) -> bool:
     except (OSError, ET.ParseError):
         return False  # check_feed reports it
     return any(item.find("link") is not None for item in root.iter("item"))
+
+
+def check_page_fields(public_blyg: Path, ledger: dict, docs: dict, origin: str,
+                      problems: Problems) -> None:
+    """§5.8: each item document's page names its live permalink, origin-
+    relative, exactly when the build wrote the pages -- withdrawn items
+    included (§9) -- and is absent otherwise, never naming a 404."""
+    with_pages = pages_built(public_blyg)
+    for blyg_id, doc in sorted(docs.items()):
+        where = f"items/{blyg_id}.json"
+        want = permalink(origin, blyg_id, ledger[blyg_id]["kind"])[len(origin):]
+        if with_pages and doc.get("page") != want:
+            problems.add(where, f"page is {doc.get('page')!r}, expected {want!r} (§5.8)")
+        elif not with_pages and "page" in doc:
+            problems.add(where, f"page {doc['page']!r}, but no item pages were built")
 
 
 def check_pages(public_blyg: Path, ledger: dict, docs: dict, origin: str,
@@ -846,10 +956,10 @@ def check_feed(public_blyg: Path, ledger: dict, docs: dict, manifest: dict,
         if entry.get("withdrawn"):
             if title != "withdrawn" or description:
                 problems.add(w, "a withdrawn item's entry has title `withdrawn` and empty description (§7)")
-        elif note and title != note:
+        elif not title:
+            problems.add(w, "every entry MUST carry a <title> (§7)")
+        elif note and title != note and not title.startswith(f"{note} \u2014 "):
             problems.add(w, f"entry drops its changelog note {note!r} (§7)")
-        if title is None and not description:
-            problems.add(w, "RSS 2.0 items need a title or a description")
         try:
             pub = email.utils.parsedate_to_datetime(item.findtext("pubDate") or "")
         except (TypeError, ValueError):
@@ -893,6 +1003,7 @@ def validate(public_dir: Path, ledger_path: Path) -> Problems:
     if docs and manifest.get("updated") != max(d.get("updated", "") for d in docs.values()):
         problems.add("blyg.json", "updated != newest item's updated")
 
+    check_page_fields(public_blyg, ledger, docs, origin, problems)
     check_snapshots(public_blyg, ledger, docs, problems)
     check_index(public_blyg, ledger, docs, problems)
     check_pins(public_blyg, ledger, origin, problems)

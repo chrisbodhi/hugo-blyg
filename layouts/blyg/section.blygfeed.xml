@@ -2,16 +2,15 @@
   Builds feed.xml (§7): one <item> per publish event across every blyg
   item, newest first, windowed to 50.
 
-  Items have no headline of their own: the item document schema (§5) has
-  no title field at all -- fragments and threads are microblog-style,
-  not headlined essays -- so content/blyg/*.md's front-matter title is
-  never read. What <title> does carry is the publish event's changelog
-  note: §7 says an entry for an older publish event "keeps its own
-  blyg:version and note", and the spec's own example puts the note in
-  <title>. Events without a note get no <title>; <description> alone
-  satisfies RSS 2.0. The withdrawal event of a currently-withdrawn item
-  is normative by name -- "its withdrawal event, with title
-  `withdrawn`" -- so that literal string wins over any note.
+  Items are titleless (§5.3) -- content/blyg/*.md's front-matter title
+  is never read -- but every entry MUST carry a <title> (§7, 0.3), so
+  it's derived the way §7 RECOMMENDS: the publish event's own changelog
+  note, an em dash, and a short excerpt of the item's latest content
+  ("note — excerpt"), or the excerpt alone when the event has no note.
+  An event with neither (an image-only item, say) falls back to its
+  kind. The withdrawal event of a currently-withdrawn item is normative
+  by name -- "a withdrawal entry's title is the literal withdrawn" -- so
+  that string wins over any note.
 
   Each event's <blyg:kind> is the kind that version actually had (the
   ledger records it per changelog entry), so an endcap an item has
@@ -53,6 +52,11 @@
     {{- $entry := index $ledger . -}}
     {{- if $entry -}}
       {{- $doc := partial "blyg/item.html" (dict "page" $page "ledger" $entry "base" $base) -}}
+      {{- /* The text of the latest content, whitespace collapsed, cut at a
+             word boundary. printf turns truncate's template.HTML back into
+             a string, so html/template still escapes it below. */ -}}
+      {{- $excerpt := $doc.content_html | plainify | htmlUnescape -}}
+      {{- $excerpt = printf "%s" (truncate 80 (trim (replaceRE `\s+` " " $excerpt) " ")) -}}
       {{- if $entry.withdrawn -}}
         {{- /* Exactly one entry for a withdrawn item; earlier events dropped (§7). */ -}}
         {{- $last := index $entry.changelog (sub (len $entry.changelog) 1) -}}
@@ -65,10 +69,15 @@
         ) -}}
       {{- else -}}
         {{- range $entry.changelog -}}
+          {{- $title := $excerpt -}}
+          {{- with .note -}}
+            {{- $title = cond (eq $excerpt "") . (printf "%s — %s" . $excerpt) -}}
+          {{- end -}}
+          {{- $kind := .kind | default $doc.kind -}}
           {{- $events = $events | append (dict
               "id" $id "version" .version "at" .at
               "sort" (printf "%s|%010d" .at (int .version))
-              "kind" (.kind | default $doc.kind) "title" (.note | default "")
+              "kind" $kind "title" ($title | default $kind)
               "description" $doc.content_html
               "created" $doc.created
               "link" (partial "blyg/permalink.html" (dict "id" $id "kind" $entry.kind "base" $base))
@@ -102,9 +111,7 @@
       {{- if $pages }}
       <link>{{ .link }}</link>
       {{- end }}
-      {{- with .title }}
-      <title>{{ . }}</title>
-      {{- end }}
+      <title>{{ .title }}</title>
       <description>{{ .description | transform.XMLEscape | safeHTML }}</description>
       <pubDate>{{ (time.AsTime .at).UTC.Format "Mon, 02 Jan 2006 15:04:05 GMT" }}</pubDate>
       <blyg:id>{{ .id }}</blyg:id>

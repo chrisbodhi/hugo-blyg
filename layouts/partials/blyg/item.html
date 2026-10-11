@@ -1,5 +1,5 @@
 {{- /*
-  Builds one blyg item document (protocol-v0.2 §5) as a Hugo dict, via
+  Builds one blyg item document (protocol-v0.3 §5) as a Hugo dict, via
   Hugo's partial-return-value feature -- the caller does:
 
     {{ $doc := partial "blyg/item.html" (dict "page" $page "ledger" $entry "base" $base) }}
@@ -24,13 +24,16 @@
   never ship as a same-version stealth edit (§13.3). "withdrawn" is a
   protocol state derived from the ledger, never an authored kind.
   Threads always carry transclusions, in directive order; fragments omit
-  the key entirely (§10.3). See the transclusion block below for how
-  their snapshots are baked.
+  the key entirely (§10.3). partials/blyg/bake.html bakes their
+  snapshots.
 */ -}}
 {{- $page := .page -}}
 {{- $entry := .ledger -}}
 {{- $base := strings.TrimSuffix "/" .base -}}
 {{- $origin := printf "%s/blyg/" $base -}}
+{{- /* The item's live permalink (§8.4): what "#..." anchors resolve
+       against (§5.2) and, origin-relative, its page (§5.8). */ -}}
+{{- $self := partial "blyg/permalink.html" (dict "id" $page.Params.blyg_id "kind" $entry.kind "base" $base) -}}
 {{- $withdrawn := $entry.withdrawn -}}
 {{- $file := $page.File.Filename -}}
 
@@ -56,100 +59,16 @@
     {{- errorf "blyg: %s body hashes to %s but the ledger says %s -- run scripts/blyg_stamp.py before building (shipping this would be a same-version stealth edit, §13.3)" $file $hash $entry.last_hash -}}
   {{- end -}}
   {{- /*
-    content_html must be self-contained (§7): absolute URLs everywhere.
-    Render hooks alone don't cover shortcodes that emit raw HTML with
-    root-relative URLs (an <img> whose src went through relURL, an
-    injected <script src="/js/...">), so this rewrites the fully
-    rendered HTML directly: every root-relative URL attribute (either quote style), every candidate
-    inside srcset, and url(...) in inline styles. RE2 (Hugo's regex
-    engine) has no lookahead, hence capturing-and-replaying the char
-    after the slash rather than a negative lookahead, to skip
-    protocol-relative "//" URLs without one. Page-relative URLs can't be
-    rewritten at all (items have no page of their own to be relative
-    to); scripts/blyg_validate.py fails the build on any that remain.
+    content_html (§5.2), with its transclusions baked (§10.2) and every
+    URL absolute -- an in-document "#..." anchor against the item's own
+    page, the same URL partials/blyg/permalink.html gives it whether or
+    not the site builds pages, so the bytes don't depend on that setting.
+    See partials/blyg/bake.html.
   */ -}}
-  {{- $html := printf "%s" $page.Content -}}
-
-  {{- /*
-    Transclusion (§10.2). scripts/blyg_stamp.py resolves each `![[id]]`
-    directive when the thread's version is created and stores, in this
-    thread's ledger entry, the directive's line, the fragment version it
-    resolved to, and that version's content_md. Baking from that stored
-    snapshot -- never from the fragment's current page -- is what keeps
-    later edits, withdrawal or pinning of the fragment from changing an
-    already-published thread (§10.4).
-
-    Each directive line becomes a placeholder paragraph (blank lines
-    around it, indentation kept, so it's a block of its own even inside
-    a list item), the body is rendered, and each placeholder is swapped
-    for the snapshot rendered in the fragment's own page context -- the
-    same rendering that produced the fragment's content_html, which
-    scripts/blyg_validate.py checks byte for byte while the fragment
-    still sits at the baked version. The placeholder is letters and
-    digits only (nothing goldmark or the typographer will touch) and
-    salted with this body's hash, so authored text can't collide with it.
-  */ -}}
-  {{- $snapshots := $entry.transclusions | default slice -}}
-  {{- if $snapshots -}}
-    {{- /* The source's lines -- blyg-gen markers and all -- which is what the
-           ledger's line numbers count and what renders the wrappers. */ -}}
-    {{- $lines := split $page.RawContent "\n" -}}
-    {{- $salt := substr (strings.TrimPrefix "sha256:" $entry.last_hash) 0 16 -}}
-    {{- $bakes := slice -}}
-    {{- range $i, $s := $snapshots -}}
-      {{- $n := int $s.line -}}
-      {{- if or (lt $n 1) (gt $n (len $lines)) -}}
-        {{- errorf "blyg: %s: the ledger's transclusion of %s names body line %d, which doesn't exist -- rerun scripts/blyg_stamp.py" $file $s.id $n -}}
-      {{- end -}}
-      {{- $line := index $lines (sub $n 1) -}}
-      {{- if ne (trim $line " \t\r") (printf "![[%s]]" $s.id) -}}
-        {{- errorf "blyg: %s body line %d is %q, but the ledger bakes ![[%s]] there -- rerun scripts/blyg_stamp.py" $file $n $line $s.id -}}
-      {{- end -}}
-      {{- if ne (printf "sha256:%s" (crypto.SHA256 (partial "blyg/content-md.html" $s.content_md))) $s.content_hash -}}
-        {{- errorf "blyg: %s: the ledger's snapshot of %s v%v doesn't match its content_hash -- a baked snapshot MUST NOT change without a new thread version (§10.4)" $file $s.id $s.version -}}
-      {{- end -}}
-      {{- $source := false -}}
-      {{- range first 1 (where site.RegularPages "Params.blyg_id" $s.id) -}}{{- $source = . -}}{{- end -}}
-      {{- if not $source -}}
-        {{- errorf "blyg: %s transcludes %s, which has no page on this site" $file $s.id -}}
-      {{- end -}}
-      {{- $token := printf "blygtransclusion%sn%d" $salt $i -}}
-      {{- $indent := index (findRE `^[ \t]*` $line 1) 0 | default "" -}}
-      {{- $bakes = $bakes | append (dict
-          "token" $token "line" $n "indent" $indent
-          "html" (printf `<blockquote class="blyg-transclusion" data-blyg-id="%s" data-blyg-version="%d">%s</blockquote>`
-                   $s.id (int $s.version) ($source.RenderString (dict "display" "block") $s.content_md))
-      ) -}}
-    {{- end -}}
-    {{- $out := slice -}}
-    {{- range $i, $line := $lines -}}
-      {{- $replaced := false -}}
-      {{- range $bakes -}}
-        {{- if eq .line (add $i 1) -}}
-          {{- $out = $out | append "" (printf "%s%s" .indent .token) "" -}}
-          {{- $replaced = true -}}
-        {{- end -}}
-      {{- end -}}
-      {{- if not $replaced -}}{{- $out = $out | append $line -}}{{- end -}}
-    {{- end -}}
-    {{- $html = printf "%s" ($page.RenderString (dict "display" "block") (delimit $out "\n")) -}}
-    {{- range $bakes -}}
-      {{- $para := printf "<p>%s</p>" .token -}}
-      {{- if ne (len (findRE $para $html)) 1 -}}
-        {{- errorf "blyg: %s: the transclusion directive on body line %d didn't render as a paragraph of its own (inside an indented code block or raw HTML?), so there's nowhere to bake it" $file .line -}}
-      {{- end -}}
-      {{- $html = replace $html $para .html -}}
-    {{- end -}}
-  {{- end -}}
-  {{- $html = replaceRE `(\s(?:src|href|poster|cite|action|formaction|data|background|longdesc))=(["'])/([^/"'])` (printf "${1}=${2}%s/${3}" $base) $html -}}
-  {{- $html = replaceRE `url\((["']?)/([^/"')])` (printf "url(${1}%s/${2}" $base) $html -}}
-  {{- range findRESubmatch `\ssrcset=(["'])([^"']*)["']` $html -}}
-    {{- $value := index . 2 -}}
-    {{- $fixed := replaceRE `(^|,)(\s*)/([^/])` (printf "${1}${2}%s/${3}" $base) $value -}}
-    {{- if ne $fixed $value -}}
-      {{- $html = replace $html (index . 0) (replace (index . 0) $value $fixed) -}}
-    {{- end -}}
-  {{- end -}}
+  {{- $html := partial "blyg/bake.html" (dict
+      "page" $page "raw" $page.RawContent "html" $page.Content
+      "snapshots" $entry.transclusions "links" $entry.links "hash" $entry.last_hash
+      "file" $file "base" $base "self" $self) -}}
   {{- $contentHTML = $html -}}
 
   {{- /*
@@ -212,7 +131,7 @@
 {{- $lastEntry := index $changelog (sub (len $changelog) 1) -}}
 
 {{- $doc := dict
-  "blyg" "0.2"
+  "blyg" "0.3"
   "id" $page.Params.blyg_id
   "kind" $kind
   "origin" $origin
@@ -225,6 +144,16 @@
   "media" $media
   "changelog" $changelog
 -}}
+{{- /*
+  §5.8: the item's permalink page, origin-relative -- only while this
+  module writes the pages, since a page that 404s is worse than none.
+  Keyed on the authored kind like the permalink itself, so a withdrawn
+  item keeps it (§9); a kind change moves it, and the old path
+  redirects (layouts/blyg/page.html).
+*/ -}}
+{{- if partial "blyg/pages-enabled.html" $page -}}
+  {{- $doc = merge $doc (dict "page" (strings.TrimPrefix $origin $self)) -}}
+{{- end -}}
 {{- /*
   Generation provenance (§5.7): one entry per blyg-gen span, in document
   order, with each source pinned by scripts/blyg_stamp.py when the version
@@ -265,11 +194,15 @@
   {{- end -}}
 {{- end -}}
 {{- if eq $entry.kind "thread" -}}
-  {{- /* §10.3: {id, version} in directive order; [] for an endcap. */ -}}
+  {{- /* §10.3: {id, version, selector?} in directive order; [] for an endcap. */ -}}
   {{- $provenance := slice -}}
   {{- if not $withdrawn -}}
     {{- range $entry.transclusions -}}
-      {{- $provenance = $provenance | append (dict "id" .id "version" (int .version)) -}}
+      {{- $t := dict "id" .id "version" (int .version) -}}
+      {{- /* A partial transclusion's text-quote selector (§10.3): exact
+             only; prefix and suffix are optional. */ -}}
+      {{- with .selection -}}{{- $t = merge $t (dict "selector" (dict "exact" .)) -}}{{- end -}}
+      {{- $provenance = $provenance | append $t -}}
     {{- end -}}
   {{- end -}}
   {{- $doc = merge $doc (dict "transclusions" $provenance) -}}

@@ -603,9 +603,144 @@ class TransclusionDirectiveTests(StampHelpers):
     def test_withdrawn_items_are_not_scanned(self):
         blyg_id = self.first()
         self.edit("post.md", "draft = false", "draft = false\nblyg_withdrawn = true")
-        self.edit("post.md", "Body.", f"![[{self.ID}]]")
+        self.edit("post.md", "Body.", f"![[{self.ID}]] [[{self.ID}]]")
         self.assertEqual(self.stamp()[0].kind, "withdraw")
         self.assertTrue(self.ledger()[blyg_id]["withdrawn"])
+
+
+class PartialAndLinkGrammarTests(unittest.TestCase):
+    """0.3's grammar (§10.1): partial transclusions and [[id]] links."""
+
+    ID = "7c9wk2mhq0v3xj8tn5rzfd41bg"
+
+    def test_attached_blockquote_is_a_partial_transclusion(self):
+        body = f"Intro.\n\n![[{self.ID}]]\n> a selection\n\nAfter.\n"
+        self.assertEqual(bs.selections(body), {3: ("a selection", 4)})
+
+    def test_indented_attached_blockquote_is_a_partial_transclusion(self):
+        body = f"- item\n\n  ![[{self.ID}]]\n  > a selection\n"
+        self.assertEqual(bs.selections(body), {3: ("a selection", 4)})
+
+    def test_a_blank_line_detaches_the_blockquote(self):
+        self.assertEqual(bs.selections(f"![[{self.ID}]]\n\n> my own quote\n"), {})
+
+    def test_selection_paragraphs_become_lines(self):
+        # Soft-wrapped lines join; a quoted blank line is a block boundary.
+        body = f"![[{self.ID}]]\n> one\n>   wrapped\n>\n>two\n"
+        self.assertEqual(bs.selections(body), {1: ("one wrapped\ntwo", 5)})
+
+    def test_a_selection_running_on_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "blank line"):
+            bs.selections(f"![[{self.ID}]]\n> quoted\nnot quoted\n")
+
+    def test_an_empty_selection_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "quotes nothing"):
+            bs.selections(f"![[{self.ID}]]\n>\n")
+
+    def test_live_links_in_order_of_first_use(self):
+        other = "5cx94j6wbmzrdnnjxvs9j1nkba"
+        body = f"See [[{other}]], [[{self.ID}]] and [[{other}]] again.\n"
+        self.assertEqual(bs.find_links(body), [other, self.ID])
+
+    def test_inert_link_forms(self):
+        body = (f"In code, `[[{self.ID}]]` and ``a [[{self.ID}]] b`` are text.\n\n"
+                f"```\n[[{self.ID}]]\n```\n\n"
+                f"Inline ![[{self.ID}]] is text, not a link.\n\n"
+                f"[[notanid]] and [[{self.ID.upper()}]] aren't ids.\n")
+        self.assertEqual(bs.find_links(body), [])
+
+    def test_a_link_between_code_spans_is_live(self):
+        self.assertEqual(bs.find_links(f"`a` [[{self.ID}]] `b`\n"), [self.ID])
+
+    def test_a_link_inside_a_selection_is_quoted_text(self):
+        body = f"![[{self.ID}]]\n> see [[{self.ID}]]\n"
+        self.assertEqual(bs.find_links(body), [])
+
+    def test_link_text_is_the_first_line_of_prose(self):
+        self.assertEqual(bs.link_text("# A *title*\n\nBody.\n"), "A title")
+        self.assertEqual(bs.link_text(f"![[{self.ID}]]\n\n[Linked](https://x.y) text.\n"),
+                         "Linked text.")
+        self.assertEqual(bs.link_text("```\ncode\n```\n> quoted\n"), "quoted")
+        long = bs.link_text("word " * 30)
+        self.assertTrue(long.endswith("\u2026") and len(long) <= bs.LINK_TEXT_CAP + 1, long)
+        self.assertEqual(bs.link_text(""), "")
+
+
+class PartialAndLinkStampTests(StampHelpers):
+    """Resolving them at publish time (§10.1, §10.2)."""
+
+    FRAG = FM + 'blyg_kind = "fragment"\n'
+
+    def setUp(self):
+        super().setUp()
+        self.frag = self.first("z-frag.md", fm=self.FRAG, body="Quoted words here.\n")
+
+    def test_a_partial_snapshot_carries_its_selection(self):
+        write_post(self.content_dir, "a.md", FM, f"![[{self.frag}]]\n> words\n")
+        thread_id = self.stamp()[0].blyg_id
+        [t] = self.ledger()[thread_id]["transclusions"]
+        self.assertEqual((t["id"], t["version"], t["line"], t["selection"]),
+                         (self.frag, 1, 1, "words"))
+        self.assertEqual(t["content_md"], "Quoted words here.\n")
+
+    def test_a_selection_running_on_is_refused_at_stamp(self):
+        write_post(self.content_dir, "a.md", FM, f"![[{self.frag}]]\n> words\nmore\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "blank line"):
+            self.stamp()
+
+    def test_a_link_resolves_to_the_targets_page(self):
+        write_post(self.content_dir, "a.md", FM, f"See [[{self.frag}]].\n")
+        item = self.stamp()[0].blyg_id
+        self.assertEqual(self.ledger()[item]["links"], [
+            {"id": self.frag, "page": f"f/{self.frag}/", "text": "Quoted words here."}])
+
+    def test_a_fragment_may_link(self):
+        write_post(self.content_dir, "a.md", self.FRAG, f"See [[{self.frag}]].\n")
+        item = self.stamp()[0].blyg_id
+        self.assertEqual([l["id"] for l in self.ledger()[item]["links"]], [self.frag])
+
+    def test_an_unresolvable_link_is_refused(self):
+        write_post(self.content_dir, "a.md", FM, "See [[7c9wk2mhq0v3xj8tn5rzfd41bg]].\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "unknown id or draft"):
+            self.stamp()
+        self.edit("a.md", "7c9wk2mhq0v3xj8tn5rzfd41bg", self.frag)
+        self.edit("z-frag.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        with self.assertRaisesRegex(bs.BlygStampError, "is withdrawn"):
+            self.stamp()
+
+    def test_a_link_is_not_re_resolved_when_its_target_moves(self):
+        write_post(self.content_dir, "a.md", FM, f"See [[{self.frag}]].\n")
+        item = self.stamp()[0].blyg_id
+        before = self.ledger()[item]
+        self.edit("z-frag.md", 'blyg_kind = "fragment"', 'blyg_kind = "thread"')
+        self.stamp()
+        self.assertEqual(self.ledger()[item], before)
+        self.edit("a.md", "See", "See now")
+        self.stamp()
+        self.assertEqual(self.ledger()[item]["links"][0]["page"], f"t/{self.frag}/")
+
+    def test_a_quoted_sources_links_ride_in_its_snapshot(self):
+        linker = self.first("y-frag.md", fm=self.FRAG, body=f"Links [[{self.frag}]].\n")
+        write_post(self.content_dir, "a.md", FM, f"![[{linker}]]\n")
+        thread_id = self.stamp()[0].blyg_id
+        [t] = self.ledger()[thread_id]["transclusions"]
+        self.assertEqual(t["links"], self.ledger()[linker]["links"])
+
+    def test_withdrawal_drops_links(self):
+        write_post(self.content_dir, "a.md", FM, f"See [[{self.frag}]].\n")
+        item = self.stamp()[0].blyg_id
+        self.edit("a.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        self.stamp()
+        self.assertNotIn("links", self.ledger()[item])
+
+    def test_hand_edited_links_are_refused(self):
+        write_post(self.content_dir, "a.md", FM, f"See [[{self.frag}]].\n")
+        item = self.stamp()[0].blyg_id
+        ledger = self.ledger()
+        del ledger[item]["links"]
+        bs.save_ledger(self.ledger_path, ledger)
+        with self.assertRaisesRegex(bs.BlygStampError, "edited by hand"):
+            self.stamp()
 
 
 class TransclusionResolutionTests(StampHelpers):
@@ -687,16 +822,88 @@ class TransclusionResolutionTests(StampHelpers):
         with self.assertRaisesRegex(bs.BlygStampError, "unknown id or draft"):
             self.stamp()
 
-    def test_thread_target_is_refused(self):
-        other = self.first("b-thread.md")
-        self.thread("a-thread.md", other)
-        with self.assertRaisesRegex(bs.BlygStampError, "is a thread"):
-            self.stamp()
+    def test_a_thread_target_bakes_its_own_snapshots_nested(self):
+        # §10.2: nesting is nested blockquotes -- the quoted thread's
+        # snapshot carries the snapshots its own version baked.
+        self.thread("b-thread.md", self.frag)
+        inner = self.stamp()[0].blyg_id
+        inner_snapshots = self.ledger()[inner]["transclusions"]
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        [t] = self.ledger()[outer]["transclusions"]
+        self.assertEqual(t, {
+            "id": inner, "version": 1, "line": 3, "kind": "thread",
+            "content_hash": bs.content_hash(f"Intro.\n\n![[{self.frag}]]\n"),
+            "content_md": f"Intro.\n\n![[{self.frag}]]\n",
+            "transclusions": inner_snapshots})
+
+    def test_a_thread_without_directives_nests_nothing(self):
+        inner = self.first("b-thread.md")
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        [t] = self.ledger()[outer]["transclusions"]
+        self.assertEqual((t["kind"], t["transclusions"]), ("thread", []))
+
+    def test_quoted_threads_are_planned_before_their_quoters(self):
+        # a-thread sorts first but quotes b-thread: one run that edits
+        # both still bakes b-thread's new version (§10.2's then-latest).
+        inner = self.first("b-thread.md")
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        self.edit("b-thread.md", "Body.", "Body, v2.")
+        self.edit("a-thread.md", "Intro.", "Intro, v2.")
+        self.stamp()
+        [t] = self.ledger()[outer]["transclusions"]
+        self.assertEqual((t["version"], t["content_md"]), (2, "Body, v2.\n"))
+
+    def test_editing_a_quoted_thread_leaves_the_quoter_alone(self):
+        inner = self.first("b-thread.md")
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        before = self.ledger()[outer]
+        self.edit("b-thread.md", "Body.", "Rewritten.")
+        self.stamp()
+        self.assertEqual(self.ledger()[outer], before)
 
     def test_a_thread_can_not_transclude_itself(self):
         thread_id = self.first("a-thread.md")
         self.edit("a-thread.md", "Body.", f"![[{thread_id}]]")
-        with self.assertRaisesRegex(bs.BlygStampError, "is a thread"):
+        with self.assertRaisesRegex(bs.BlygStampError, "can't transclude itself"):
+            self.stamp()
+
+    def test_a_thread_can_not_quote_a_thread_that_quotes_it(self):
+        # §10.2's closure check, one level and two levels deep.
+        a = self.first("a-thread.md")
+        self.thread("b-thread.md", a)
+        b = self.stamp()[1].blyg_id
+        self.edit("a-thread.md", "Body.", f"![[{b}]]")
+        with self.assertRaisesRegex(bs.BlygStampError, "MUST NOT quote one that quotes it"):
+            self.stamp()
+        self.edit("a-thread.md", f"![[{b}]]", "Body.")
+        self.thread("c-thread.md", b)
+        c = self.stamp()[2].blyg_id
+        self.edit("a-thread.md", "Body.", f"![[{c}]]")
+        with self.assertRaisesRegex(bs.BlygStampError, "MUST NOT quote one that quotes it"):
+            self.stamp()
+
+    def test_republishing_against_a_withdrawn_thread_is_refused(self):
+        inner = self.first("b-thread.md")
+        self.thread("a-thread.md", inner)
+        self.stamp()
+        self.edit("b-thread.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        self.edit("a-thread.md", "Intro.", "Intro, edited.")
+        with self.assertRaisesRegex(bs.BlygStampError, "is withdrawn"):
+            self.stamp()
+
+    def test_a_tampered_nested_snapshot_is_refused(self):
+        self.thread("b-thread.md", self.frag)
+        inner = self.stamp()[0].blyg_id
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        ledger = self.ledger()
+        ledger[outer]["transclusions"][0]["transclusions"][0]["content_md"] = "Forged.\n"
+        bs.save_ledger(self.ledger_path, ledger)
+        with self.assertRaisesRegex(bs.BlygStampError, "doesn't match its content_hash"):
             self.stamp()
 
     def test_directive_in_a_fragment_is_refused(self):
@@ -831,6 +1038,28 @@ class TransclusionResolutionTests(StampHelpers):
         entry = self.ledger()[thread_id]
         self.assertEqual(entry["version"], 1)
         self.assertEqual(entry["transclusions"][0]["version"], 1)
+
+    def test_amend_re_resolving_a_quoted_thread_reaches_its_quoter(self):
+        # The fragment's unshipped v2 is rewritten; b-thread baked it, and
+        # a-thread baked b-thread -- both follow, inner first.
+        self.thread("b-thread.md", self.frag)
+        inner = self.stamp()[0].blyg_id
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        shipped = self.ledger()
+        self.edit("z-frag.md", "Quoted.", "Draft.")
+        self.edit("b-thread.md", "Intro.", "Edited.")
+        self.edit("a-thread.md", "Intro.", "Edited.")
+        self.stamp(published=shipped)
+        self.edit("z-frag.md", "Draft.", "Final.")
+        plans = {p.path.name: p for p in self.stamp(published=shipped)}
+        self.assertEqual(plans["b-thread.md"].kind, "amend")
+        self.assertEqual(plans["a-thread.md"].kind, "amend")
+        [t] = self.ledger()[outer]["transclusions"]
+        self.assertEqual(t["transclusions"][0]["content_md"], "Final.\n")
+        self.assertEqual(t["transclusions"], self.ledger()[inner]["transclusions"])
+        kinds = {p.kind for p in self.stamp(published=shipped)}
+        self.assertEqual(kinds, {"noop"})
 
     def test_amend_withdrawing_a_baked_unshipped_source_is_refused(self):
         # The unshipped v2 the thread baked is rewritten into an endcap, so

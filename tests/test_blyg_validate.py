@@ -32,9 +32,16 @@ class ContentHTMLTests(unittest.TestCase):
 
     def test_self_contained_html_passes(self):
         self.assertEqual(self.problems(
-            f'<p><a href="https://other.example/">x</a> <a href="#fn:1">1</a>'
+            f'<p><a href="https://other.example/">x</a> <a href="{ORIGIN}t/x/#fn:1">1</a>'
             f'<img src="{ORIGIN}media/a.png" srcset="{ORIGIN}media/a.png 2x">'
             f'<a href="mailto:a@b.c">m</a> <img src="data:image/png;base64,AA=="></p>'), [])
+
+    def test_in_document_anchor_fails(self):
+        # 0.3 §5.2: every URL absolute, footnote anchors included.
+        self.assertEqual(len(self.problems('<a href="#fn:1">1</a>')), 1)
+
+    def test_empty_url_fails(self):
+        self.assertEqual(len(self.problems('<a href="">x</a>')), 1)
 
     def test_page_relative_link_fails(self):
         self.assertEqual(len(self.problems('<a href="other/page">x</a>')), 1)
@@ -67,7 +74,7 @@ def item_doc(blyg_id, *, kind="thread", version=1, withdrawn=False, body="Body.\
                               for v in range(1, version + 1)]
     md, h = ("", "") if withdrawn else (body, html)
     doc = {
-        "blyg": "0.2", "id": blyg_id, "kind": "withdrawn" if withdrawn else kind,
+        "blyg": "0.3", "id": blyg_id, "kind": "withdrawn" if withdrawn else kind,
         "origin": ORIGIN, "created": changelog[0]["at"], "updated": changelog[-1]["at"],
         "version": version, "content_md": md, "content_html": h,
         "content_hash": bs.content_hash(md), "media": [], "changelog": changelog,
@@ -75,6 +82,20 @@ def item_doc(blyg_id, *, kind="thread", version=1, withdrawn=False, body="Body.\
     if kind == "thread":
         doc["transclusions"] = []
     return doc
+
+
+class TextContentTests(unittest.TestCase):
+    """§10.2's text content, as partial transclusions are checked against."""
+
+    def test_blocks_become_lines_and_whitespace_collapses(self):
+        self.assertEqual(bv.text_content(
+            "<p>One <em>two</em>\n  three.</p>\n<ul>\n<li>Four &amp; five</li>\n</ul>"),
+            "One two three.\nFour & five")
+
+    def test_nested_quotes_and_breaks(self):
+        self.assertEqual(bv.text_content(
+            '<blockquote class="blyg-transclusion"><p>A<br>B</p></blockquote><p>C</p>'),
+            "A\nB\nC")
 
 
 class SurfaceTests(unittest.TestCase):
@@ -104,7 +125,7 @@ class SurfaceTests(unittest.TestCase):
         self.ledger_path.write_text(json.dumps(self.ledger), encoding="utf-8")
         updated = max(d["updated"] for d in self.docs.values())
         (self.blyg / "blyg.json").write_text(json.dumps({
-            "blyg": "0.2", "level": 1, "generator": "t", "site": ORIGIN, "title": "t",
+            "blyg": "0.3", "level": 1, "generator": "t", "site": ORIGIN, "title": "t",
             "feed": "feed.xml", "items": "items/index.json", "updated": updated,
             **self.manifest_extra}), encoding="utf-8")
         rows = sorted(({k: d[k] for k in ("id", "kind", "created", "updated", "version")}
@@ -112,13 +133,19 @@ class SurfaceTests(unittest.TestCase):
         (self.blyg / "items" / "index.json").write_text(
             json.dumps({"updated": updated, "items": rows}), encoding="utf-8")
         for i, d in self.docs.items():
+            if self.pages is not None:  # §5.8: page names the live page
+                d.setdefault("page", bv.permalink(ORIGIN, i, self.ledger[i]["kind"])[len(ORIGIN):])
             (self.blyg / "items" / f"{i}.json").write_text(json.dumps(d), encoding="utf-8")
         items = self.feed_items
         if items is None:
             items = []
             for i, d in self.docs.items():
                 for c in reversed(self.ledger[i]["changelog"]):
-                    items.append(self.feed_item(i, c["version"], d, title=c["note"]))
+                    excerpt = "Body."
+                    title = f"{c['note']} \u2014 {excerpt}" if c["note"] else excerpt
+                    if self.ledger[i].get("withdrawn"):
+                        title = "withdrawn"
+                    items.append(self.feed_item(i, c["version"], d, title=title))
         (self.blyg / "feed.xml").write_text(
             '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" '
             'xmlns:blyg="https://blygger.org/ns/0.1"><channel><title>t</title>'
@@ -129,7 +156,7 @@ class SurfaceTests(unittest.TestCase):
             (self.blyg / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.blyg / rel).write_text(text, encoding="utf-8")
 
-    def feed_item(self, blyg_id, version, doc, *, title=None, description=None, kind=None):
+    def feed_item(self, blyg_id, version, doc, *, title="Body.", description=None, kind=None):
         at = self.ledger[blyg_id]["changelog"][version - 1]["at"]
         pub = datetime.datetime.fromisoformat(at.replace("Z", "+00:00")).strftime(
             "%a, %d %b %Y %H:%M:%S GMT")
@@ -177,8 +204,58 @@ class SurfaceTests(unittest.TestCase):
     def test_feed_must_keep_the_note(self):
         self.ledger[ID]["changelog"][0]["note"] = "first"
         self.docs[ID]["changelog"][0]["note"] = "first"
-        self.feed_items = [self.feed_item(ID, 1, self.docs[ID])]
+        self.feed_items = [self.feed_item(ID, 1, self.docs[ID], title="Body.")]
         self.assertTrue(any("changelog note" in p for p in self.problems()))
+
+    def test_feed_may_derive_note_and_excerpt(self):
+        self.ledger[ID]["changelog"][0]["note"] = "first"
+        self.docs[ID]["changelog"][0]["note"] = "first"
+        self.feed_items = [self.feed_item(ID, 1, self.docs[ID], title="first \u2014 Body.")]
+        self.assertEqual(self.problems(), [])
+
+    def test_level_is_1_or_2(self):
+        self.manifest_extra = {"level": 2}
+        self.assertEqual(self.problems(), [])
+        self.manifest_extra = {"level": 3}
+        self.assertTrue(any("only 1 and 2" in p for p in self.problems()))
+
+    def test_generator_url_must_be_absolute(self):
+        self.manifest_extra = {"generator_url": "https://example.net/src"}
+        self.assertEqual(self.problems(), [])
+        self.manifest_extra = {"generator_url": "github.com/x/y"}
+        self.assertTrue(any("generator_url" in p for p in self.problems()))
+
+    def test_page_without_built_pages_fails(self):
+        self.pages = None
+        self.docs[ID]["page"] = f"t/{ID}/"
+        self.assertTrue(any("no item pages were built" in p for p in self.problems()))
+
+    def test_feed_entry_must_have_a_title(self):
+        # 0.3 §7: RSS requires it, so publishers MUST emit one.
+        self.feed_items = [self.feed_item(ID, 1, self.docs[ID], title="")]
+        self.assertTrue(any("MUST carry a <title>" in p for p in self.problems()))
+
+    def link_to_self(self, html):
+        if type(self) is not SurfaceTests:
+            self.skipTest("replaces the item with a self-link; the base surface's alone")
+        body = f"See [[{ID}]].\n"
+        self.docs[ID] = item_doc(ID, body=body, html=html)
+        self.ledger[ID]["last_hash"] = bs.content_hash(body)
+
+    def test_a_resolved_link_renders_as_an_anchor(self):
+        self.link_to_self(f'<p>See <a href="{ORIGIN}t/{ID}/">Body.</a>.</p>')
+        self.ledger[ID]["links"] = [{"id": ID, "page": f"t/{ID}/", "text": "Body."}]
+        self.assertEqual(self.problems(), [])
+
+    def test_an_unresolved_link_fails(self):
+        # The stamp refuses it first; this is the backstop on the wire.
+        self.link_to_self(f"<p>See [[{ID}]].</p>")
+        self.assertTrue(any("MUST resolve (§10.1)" in p for p in self.problems()))
+
+    def test_a_link_must_render_its_anchor(self):
+        self.link_to_self(f"<p>See [[{ID}]].</p>")
+        self.ledger[ID]["links"] = [{"id": ID, "page": f"t/{ID}/", "text": "Body."}]
+        self.assertTrue(any("isn't rendered as an anchor" in p for p in self.problems()))
 
     def test_feed_description_must_be_latest_content(self):
         self.feed_items = [self.feed_item(ID, 1, self.docs[ID], description="<p>old</p>")]
@@ -315,6 +392,12 @@ class PageTests(SurfaceTests):
         super().setUp()
         self.pages = {"index.html": page(ORIGIN),
                       f"t/{ID}/index.html": page(self.LIVE, "<p>Body.</p>")}
+
+    def test_page_field_names_the_live_page(self):
+        self.docs[ID]["page"] = None
+        self.assertTrue(any("(§5.8)" in p for p in self.problems()))
+        self.docs[ID]["page"] = f"f/{ID}/"
+        self.assertTrue(any("(§5.8)" in p for p in self.problems()))
 
     def pin_v1(self):
         self.ledger[ID]["changelog"][0]["pinned"] = True
@@ -497,6 +580,74 @@ class TransclusionSurfaceTests(SurfaceTests):
     def test_valid_thread_passes(self):
         self.assertEqual(self.problems(), [])
 
+    OUTER = "3tvmngj59053w661mhapmy60mb"
+
+    def quote_the_thread(self, inner_html=None):
+        """OUTER, a thread baking thread ID v1 -- and so FRAG, nested."""
+        inner = self.docs[ID]["content_html"] if inner_html is None else inner_html
+        body = f"Outer.\n\n![[{ID}]]\n"
+        self.docs[self.OUTER] = item_doc(self.OUTER, body=body,
+                                         html=f"<p>Outer.</p>\n{bv.wrapper(ID, 1, inner)}")
+        self.docs[self.OUTER]["transclusions"] = [{"id": ID, "version": 1}]
+        self.ledger[self.OUTER] = {
+            "path": "content/blyg/o.md", "created": "2026-01-01T00:00:00Z", "version": 1,
+            "kind": "thread", "withdrawn": False, "last_hash": bs.content_hash(body),
+            "changelog": [{"version": 1, "at": "2026-01-01T00:00:00Z", "note": None,
+                           "kind": "thread"}],
+            "transclusions": [{"id": ID, "version": 1, "line": 3, "kind": "thread",
+                               "content_hash": self.ledger[ID]["last_hash"],
+                               "content_md": f"Intro.\n\n![[{FRAG}]]\n",
+                               "transclusions": self.ledger[ID]["transclusions"]}]}
+
+    def test_a_thread_may_quote_a_thread(self):
+        # §10.2: nesting is nested blockquotes; only the direct quote is
+        # OUTER's provenance (§10.3).
+        self.quote_the_thread()
+        self.assertEqual(self.problems(), [])
+
+    def test_a_quoted_thread_must_be_baked_with_its_own_quotes(self):
+        self.quote_the_thread(inner_html="<p>Intro.</p>\n")
+        self.assertTrue(any("byte-identical" in p for p in self.problems()))
+
+    def quote_partially(self, selection="Quoted.", bake=None):
+        body = f"Intro.\n\n![[{FRAG}]]\n> {selection}\n"
+        lines = (bake if bake is not None else selection).split("\n")
+        baked = (f'<blockquote class="blyg-transclusion blyg-partial" data-blyg-id="{FRAG}" '
+                 f'data-blyg-version="1">' + "".join(f"<p>{escape(l)}</p>" for l in lines)
+                 + "</blockquote>")
+        self.docs[ID] = item_doc(ID, body=body, html=f"<p>Intro.</p>\n{baked}")
+        self.docs[ID]["transclusions"] = [{"id": FRAG, "version": 1,
+                                           "selector": {"exact": selection}}]
+        self.ledger[ID]["last_hash"] = bs.content_hash(body)
+        self.ledger[ID]["transclusions"][0]["selection"] = selection
+
+    def test_a_partial_transclusion_passes(self):
+        self.quote_partially("Quoted.")
+        self.assertEqual(self.problems(), [])
+
+    def test_a_partial_must_carry_its_selector(self):
+        self.quote_partially()
+        del self.docs[ID]["transclusions"][0]["selector"]
+        self.assertTrue(any("(§10.3)" in p for p in self.problems()))
+
+    def test_a_partial_bake_is_the_selection(self):
+        self.quote_partially("Quoted.", bake="Quoted, sort of.")
+        self.assertTrue(any("one <p> per line" in p for p in self.problems()))
+
+    def test_a_partial_whole_bake_fails(self):
+        self.quote_partially()
+        self.docs[ID]["content_html"] = "<p>Intro.</p>\n" + bv.wrapper(FRAG, 1, self.FRAG_HTML)
+        self.assertTrue(any("blyg-partial class" in p for p in self.problems()))
+
+    def test_a_selection_not_in_the_source_fails(self):
+        self.quote_partially("Misquoted.")
+        self.assertTrue(any("isn't in that version's text" in p for p in self.problems()))
+
+    def test_a_quote_cycle_fails(self):
+        self.quote_the_thread()
+        self.docs[ID]["transclusions"].append({"id": self.OUTER, "version": 1})
+        self.assertTrue(any("quotes itself" in p for p in self.problems()))
+
     def test_provenance_must_match_the_ledger(self):
         self.docs[ID]["transclusions"] = [{"id": FRAG, "version": 2}]
         self.assertTrue(any("baked" in p for p in self.problems()))
@@ -540,9 +691,9 @@ class TransclusionSurfaceTests(SurfaceTests):
         self.assertTrue(any(f"{FRAG} v2, a version {FRAG} has never published" in p
                             for p in self.problems()))
 
-    def test_provenance_naming_a_non_fragment_version_fails(self):
-        self.ledger[FRAG]["changelog"][0]["kind"] = "thread"
-        self.assertTrue(any("not a fragment" in p for p in self.problems()))
+    def test_provenance_naming_an_endcap_fails(self):
+        self.ledger[FRAG]["changelog"][0]["kind"] = "withdrawn"
+        self.assertTrue(any("no content to quote" in p for p in self.problems()))
 
     def test_withdrawn_thread_carries_empty_transclusions(self):
         self.ledger[ID].update(version=2, withdrawn=True, last_hash=bs.EMPTY_CONTENT_HASH)
