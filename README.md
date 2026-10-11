@@ -324,8 +324,10 @@ GitHub's `ubuntu-latest` runners come with Go installed.
 ## The publish-from-issue action
 
 `publish-from-issue/action.yml` is a composite GitHub Action that turns
-an issue into a new fragment: the issue body becomes the item body
-(line endings normalized to LF before hashing), and the title only names
+an issue into a new item: the issue body becomes the item body
+(line endings normalized to LF before hashing). It's a fragment, unless
+the body has a `![[id]]` directive, which only a thread can carry (§10),
+so then it's a thread. The title only names
 the file (`content/blyg/YYYY-MM-DD-<slug>.md`) and the PR, since items
 have no title field (§5). It stamps the item, pushes `blyg/issue-N`, and
 opens a PR against the default branch that closes the issue on merge.

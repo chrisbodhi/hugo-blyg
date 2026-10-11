@@ -1,10 +1,11 @@
-name: Publish blyg fragment from issue
+name: Publish blyg item from issue
 description: >-
   Turns an issue marked for blyg (by label, or by a title prefix for
   clients that can't label, like GitHub Mobile) into a new, stamped blyg
-  fragment and opens a PR that closes the issue on merge. The issue body
-  is the item body; the title, minus the prefix, only names the file and
-  the PR (blyg items have no title field, §5).
+  item -- a fragment, or a thread when the body has a ![[id]] directive
+  -- and opens a PR that closes the issue on merge. The issue body is the
+  item body; the title, minus the prefix, only names the file and the PR
+  (blyg items have no title field, §5).
 
 # Call it from a workflow on `issues: [opened, labeled]`, after
 # actions/checkout of the branch the PR should target, with `contents`,
@@ -113,6 +114,7 @@ runs:
         FILE: ${{ steps.item.outputs.path }}
       run: |
         id=$(sed -n 's/^blyg_id = "\(.*\)"$/\1/p' "$FILE")
+        kind=$(sed -n 's/^blyg_kind = "\(.*\)"$/\1/p' "$FILE")
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
         git switch -c "$BRANCH"
@@ -124,14 +126,14 @@ runs:
         EOF
         git push -u origin "$BRANCH"
         pr=$(gh pr create --base "$BASE" --head "$BRANCH" --title "$ISSUE_TITLE" --body-file - <<EOF
-        New blyg fragment \`$id\` at \`$FILE\`, from #$ISSUE_NUMBER.
+        New blyg $kind \`$id\` at \`$FILE\`, from #$ISSUE_NUMBER.
 
         Merging deploys it and closes the issue.
 
         Closes #$ISSUE_NUMBER
         EOF
         )
-        gh issue comment "$ISSUE_NUMBER" --body "Opened $pr for blyg fragment \`$id\`. Merging it publishes this and closes the issue."
+        gh issue comment "$ISSUE_NUMBER" --body "Opened $pr for blyg $kind \`$id\`. Merging it publishes this and closes the issue."
         {
           echo "published=true"
           echo "blyg-id=$id"
@@ -148,7 +150,7 @@ runs:
         LABEL: ${{ inputs.label }}
       run: >-
         gh issue comment "$ISSUE_NUMBER" --body
-        "Couldn't publish this as a blyg fragment. The issue stays open; see
+        "Couldn't publish this as a blyg item. The issue stays open; see
         $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID for the error.
         To retry, delete the \`$BRANCH\` branch if it was pushed, then remove and re-add the $LABEL label
         (or file it again as a new issue)."
