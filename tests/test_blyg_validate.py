@@ -32,9 +32,16 @@ class ContentHTMLTests(unittest.TestCase):
 
     def test_self_contained_html_passes(self):
         self.assertEqual(self.problems(
-            f'<p><a href="https://other.example/">x</a> <a href="#fn:1">1</a>'
+            f'<p><a href="https://other.example/">x</a> <a href="{ORIGIN}t/x/#fn:1">1</a>'
             f'<img src="{ORIGIN}media/a.png" srcset="{ORIGIN}media/a.png 2x">'
             f'<a href="mailto:a@b.c">m</a> <img src="data:image/png;base64,AA=="></p>'), [])
+
+    def test_in_document_anchor_fails(self):
+        # 0.3 §5.2: every URL absolute, footnote anchors included.
+        self.assertEqual(len(self.problems('<a href="#fn:1">1</a>')), 1)
+
+    def test_empty_url_fails(self):
+        self.assertEqual(len(self.problems('<a href="">x</a>')), 1)
 
     def test_page_relative_link_fails(self):
         self.assertEqual(len(self.problems('<a href="other/page">x</a>')), 1)
@@ -67,7 +74,7 @@ def item_doc(blyg_id, *, kind="thread", version=1, withdrawn=False, body="Body.\
                               for v in range(1, version + 1)]
     md, h = ("", "") if withdrawn else (body, html)
     doc = {
-        "blyg": "0.2", "id": blyg_id, "kind": "withdrawn" if withdrawn else kind,
+        "blyg": "0.3", "id": blyg_id, "kind": "withdrawn" if withdrawn else kind,
         "origin": ORIGIN, "created": changelog[0]["at"], "updated": changelog[-1]["at"],
         "version": version, "content_md": md, "content_html": h,
         "content_hash": bs.content_hash(md), "media": [], "changelog": changelog,
@@ -104,7 +111,7 @@ class SurfaceTests(unittest.TestCase):
         self.ledger_path.write_text(json.dumps(self.ledger), encoding="utf-8")
         updated = max(d["updated"] for d in self.docs.values())
         (self.blyg / "blyg.json").write_text(json.dumps({
-            "blyg": "0.2", "level": 1, "generator": "t", "site": ORIGIN, "title": "t",
+            "blyg": "0.3", "level": 1, "generator": "t", "site": ORIGIN, "title": "t",
             "feed": "feed.xml", "items": "items/index.json", "updated": updated,
             **self.manifest_extra}), encoding="utf-8")
         rows = sorted(({k: d[k] for k in ("id", "kind", "created", "updated", "version")}
@@ -118,7 +125,11 @@ class SurfaceTests(unittest.TestCase):
             items = []
             for i, d in self.docs.items():
                 for c in reversed(self.ledger[i]["changelog"]):
-                    items.append(self.feed_item(i, c["version"], d, title=c["note"]))
+                    excerpt = "Body."
+                    title = f"{c['note']} \u2014 {excerpt}" if c["note"] else excerpt
+                    if self.ledger[i].get("withdrawn"):
+                        title = "withdrawn"
+                    items.append(self.feed_item(i, c["version"], d, title=title))
         (self.blyg / "feed.xml").write_text(
             '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" '
             'xmlns:blyg="https://blygger.org/ns/0.1"><channel><title>t</title>'
@@ -129,7 +140,7 @@ class SurfaceTests(unittest.TestCase):
             (self.blyg / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.blyg / rel).write_text(text, encoding="utf-8")
 
-    def feed_item(self, blyg_id, version, doc, *, title=None, description=None, kind=None):
+    def feed_item(self, blyg_id, version, doc, *, title="Body.", description=None, kind=None):
         at = self.ledger[blyg_id]["changelog"][version - 1]["at"]
         pub = datetime.datetime.fromisoformat(at.replace("Z", "+00:00")).strftime(
             "%a, %d %b %Y %H:%M:%S GMT")
@@ -177,8 +188,26 @@ class SurfaceTests(unittest.TestCase):
     def test_feed_must_keep_the_note(self):
         self.ledger[ID]["changelog"][0]["note"] = "first"
         self.docs[ID]["changelog"][0]["note"] = "first"
-        self.feed_items = [self.feed_item(ID, 1, self.docs[ID])]
+        self.feed_items = [self.feed_item(ID, 1, self.docs[ID], title="Body.")]
         self.assertTrue(any("changelog note" in p for p in self.problems()))
+
+    def test_feed_may_derive_note_and_excerpt(self):
+        self.ledger[ID]["changelog"][0]["note"] = "first"
+        self.docs[ID]["changelog"][0]["note"] = "first"
+        self.feed_items = [self.feed_item(ID, 1, self.docs[ID], title="first \u2014 Body.")]
+        self.assertEqual(self.problems(), [])
+
+    def test_feed_entry_must_have_a_title(self):
+        # 0.3 §7: RSS requires it, so publishers MUST emit one.
+        self.feed_items = [self.feed_item(ID, 1, self.docs[ID], title="")]
+        self.assertTrue(any("MUST carry a <title>" in p for p in self.problems()))
+
+    def test_unsupported_grammar_in_content_md_fails(self):
+        # The stamp refuses it first; this is the backstop on the wire.
+        body = f"See [[{ID}]].\n"
+        self.docs[ID] = item_doc(ID, body=body, html="<p>See it.</p>")
+        self.ledger[ID]["last_hash"] = bs.content_hash(body)
+        self.assertTrue(any("plain internal link" in p for p in self.problems()))
 
     def test_feed_description_must_be_latest_content(self):
         self.feed_items = [self.feed_item(ID, 1, self.docs[ID], description="<p>old</p>")]

@@ -78,3 +78,24 @@ build
 field $thread 'd["content_html"]' | grep -q 'data-blyg-version="4"><p>An edited fragment' \
   || fail "republished thread doesn't bake the edited fragment"
 echo "ok: republishing the thread re-resolves to the then-latest version"
+
+# 5. Footnotes: every URL in content_html is absolute (§5.2), so a footnote
+#    anchor points at its item's page -- and one quoted with a fragment
+#    keeps pointing at the fragment's page, since the bake is the
+#    fragment's own content_html.
+printf '\nFootnoted.[^a]\n\n[^a]: A fragment footnote.\n' >> "$fragment_md"
+printf '\nFootnoted too.[^b]\n\n[^b]: A thread footnote.\n' >> "$thread_md"
+stamp
+build
+fragment_page="https://example.org/blyg/f/$fragment/"
+thread_page="https://example.org/blyg/t/$thread/"
+field $fragment 'd["content_html"]' | grep -q "href=\"$fragment_page#fn:1\"" \
+  || fail "the fragment's footnote anchor isn't absolute against its own page"
+field $thread 'd["content_html"]' | grep -q "href=\"$fragment_page#fn:1\"" \
+  || fail "the thread's bake doesn't keep the fragment's absolute footnote anchor"
+field $thread 'd["content_html"]' | grep -q "href=\"$thread_page#fn:1\"" \
+  || fail "the thread's own footnote anchor isn't absolute against its page"
+if field $thread 'd["content_html"]' | grep -q "href=\"#"; then
+  fail "the thread's content_html still carries a relative #anchor"
+fi
+echo "ok: footnote anchors are absolute, quoted ones against their source's page"

@@ -1,7 +1,9 @@
-# Blygger protocol v0.2 — publisher conformance checklist
+# Blygger protocol v0.3 — publisher conformance checklist
 
 Source: [`blygger/blygger-spec`](https://github.com/blygger/blygger-spec)
-`docs/protocol-v0.2.md`, pinned at commit `c5884b9214b6972c3aed2fecf9aae68c9eab5267`.
+`docs/protocol-v0.3.md`, as published at
+[blygger.org/spec/0.3](https://blygger.org/spec/0.3/) from commit `80c8d65`
+(the 2026-10-06 eleventh revision).
 
 This is every normative MUST / MUST NOT in §§4–10 (the publish side), turned
 into a checklist, plus the §13 reader rules a validator needs to check
@@ -26,8 +28,13 @@ three in every workflow that builds, above all the one that actually ships
    checked against this list and against the ledger — above all the
    rendered `content_html`, which only exists after Hugo runs.
 
-Scope: this module publishes at Level 1 only, as a single-author,
-non-multiplayer origin. Every item authors its `kind` via
+Scope: this module publishes the 0.3 surfaces at Level 1 only — the
+single-origin protocol 0.3 carries forward from 0.2 — as a single-author,
+non-multiplayer origin. None of 0.3's cross-client constructs (remote
+transclusion, thread nesting, stubs, lineage, `page`, `cited`, Webmention)
+are emitted, all of which are optional to emit (§3); the two pieces of
+0.3 grammar that would change what existing bytes mean are refused (§10
+below). Every item authors its `kind` via
 `blyg_kind` in front matter (`"fragment"` or `"thread"`; defaults to
 `"thread"`), and threads resolve `![[id]]` directives against the
 site's own fragments at publish time (§10). A site that writes
@@ -130,7 +137,13 @@ marked with the module's `blyg-gen` shortcode and disclosed as
 - [ ] `author`, if present, MUST be accepted with any additional members;
       clients that store/re-emit item JSON MUST carry it verbatim, never
       synthesized or rewritten.
-- [ ] `"forked_from"` MUST NOT be emitted at 0.2 (reserved for L2/0.3).
+- [ ] `content_html` is self-contained (§5.2, 0.3 decision #53): every URL
+      in it MUST be absolute — media, links, and in-document anchors too.
+      See §7 below for how; a footnote anchor resolves against its item's
+      page (`f/{id}/` or `t/{id}/`, whether or not the site builds pages),
+      and a quoted fragment's against the fragment's page.
+- [ ] `"forked_from"` (§5.6, optional) is never emitted: this module
+      doesn't build lineage.
 - [ ] `content_md` carries no authoring markup: generated spans are
       marked in the source with `{{< blyg-gen >}}…{{< /blyg-gen >}}`,
       whose markers `blyg_stamp.py` (`strip_gen_markers`) and the build
@@ -171,14 +184,16 @@ marked with the module's `blyg-gen` shortcode and disclosed as
 
 ## §6 — Manifest and archive index
 
-- [ ] `blyg.json` carries `"blyg": "0.2"`, `level`, `generator`, `site`,
+- [ ] `blyg.json` carries `"blyg": "0.3"`, `level`, `generator`, `site`,
       `title`, `feed`, `items`, `updated`; `blogroll` key present only
       when a non-empty blogroll is served (§11 below).
       `level` comes from `[params.blyg].level` in `config.toml`
-      (defaults to `1`); the build refuses any value other than `1`. L2's
-      constructs (stub metadata, nesting, `forked_from`, webmention)
-      arrive with 0.3 and none are built. The blogroll never changes the
-      level, and generation provenance is L1.
+      (defaults to `1`); the build refuses any value other than `1`. The
+      blogroll never changes the level, and generation provenance is L1.
+- [ ] Item documents carry `"blyg": "0.3"` too. Pin files keep whatever
+      they were written with — a 0.2 pin is a valid 0.3 document (§3) and
+      its bytes are promised forever (§8) — so the validator checks the
+      key on live documents only.
 - [ ] `items/index.json` lists **every** item ever published — including
       withdrawn items — with no window, ordered by `updated` descending.
 
@@ -189,8 +204,12 @@ marked with the module's `blyg-gen` shortcode and disclosed as
       version).
 - [ ] One `<item>` per publish event, newest first (version breaks
       same-second ties); window bounded (RECOMMENDED 50).
-- [ ] An entry keeps its own `blyg:version` **and note**: the note is the
-      entry's `<title>` (as in the spec's example); no note, no `<title>`.
+- [ ] Every entry MUST carry a `<title>` (0.3). It's derived as §7
+      RECOMMENDS: the event's own changelog note, an em dash, and an
+      excerpt of the item's latest text (`note — excerpt`), or the excerpt
+      alone without a note — so an entry keeps its own `blyg:version`
+      **and note**. An event with neither falls back to its kind; a
+      withdrawal entry's title is the literal `withdrawn`.
       `<blyg:kind>` is the kind that version had, from the ledger.
 - [ ] `lastBuildDate` is the newest event's time, not the build clock, so
       an unchanged feed stays byte-identical for conditional requests
@@ -203,13 +222,14 @@ marked with the module's `blyg-gen` shortcode and disclosed as
       `withdrawn`, empty description); its earlier publish events MUST be
       dropped from the window.
 - [ ] Pinning emits no feed event.
-- [ ] `<description>` HTML MUST be self-contained: absolute media URLs,
-      no dependence on the origin's stylesheets or scripts.
-      The rewrite in `item.html` absolutizes root-relative URLs in any URL
-      attribute (either quote style), `srcset`, and inline-style `url()`;
+- [ ] `<description>` HTML MUST be self-contained: every URL absolute
+      (§5.2), no dependence on the origin's stylesheets or scripts.
+      `partials/blyg/absolute-urls.html` absolutizes root-relative URLs and
+      in-document `#anchors` in any URL attribute (either quote style),
+      root-relative `srcset` candidates, and inline-style `url()`;
       `blyg_validate.py` fails the build on anything left non-absolute
-      (page-relative links included) and on origin-hosted scripts or
-      stylesheets. In-document `#anchors` (footnotes) are allowed.
+      (page-relative and empty URLs included) and on origin-hosted scripts
+      or stylesheets.
       *(Empirical note: goldmark render hooks alone are not sufficient
       here — shortcodes that emit raw HTML (an `<img src="{{ $src | relURL }}">`,
       an injected `<script src="/js/…">`) put root-relative URLs in the
@@ -346,9 +366,26 @@ markup-config change can change its bytes, but never its content. See
 the README's "Transclusion". `tests/transclusion_e2e.sh` proves the
 no-cascade rule against real builds in CI.)*
 
-- [ ] Transclusion targets MUST be fragments of the same origin (0.2,
-      local-only). Only threads transclude: a directive in a fragment is
-      refused (a fragment has no `transclusions` to record it in).
+- [ ] Transclusion targets are fragments of this origin. 0.3 lifts both
+      restrictions (threads, and imported items from other origins, may
+      be quoted), but what a publisher quotes is its own choice, and this
+      module only resolves local fragments. Only threads transclude: a
+      directive in a fragment is refused (a fragment has no
+      `transclusions` to record it in).
+- [ ] 0.3 grammar this module doesn't build is refused, never shipped
+      with its 0.2 meaning (`unsupported_grammar` in `blyg_stamp.py`, run
+      by the stamp and again by `blyg_validate.py` on every `content_md`):
+      - a directive followed directly by a blockquote, no blank line
+        between, is a partial transclusion (§10.1), whose selection MUST
+        be checked against the source's text. Baking the whole item there
+        would misquote, so it's refused; `item.html` fails the build on
+        one too, for content stamped before 0.3. A blank line detaches the
+        blockquote, as the spec says.
+      - `[[id]]` outside code is a plain internal link (§10.1), which MUST
+        render as an absolute anchor. Shipping the literal text would be
+        wrong, so it's refused — as code spans and fences keep it inert,
+        they're left alone; an indented code block isn't recognized, so
+        fence it.
 - [ ] A line consisting solely of `![[` + a 26-character item id + `]]`
       is a transclusion directive; the same sequence elsewhere is inert
       text. Fenced code is recognized as inert; a directive-shaped line
@@ -358,9 +395,10 @@ no-cascade rule against real builds in CI.)*
       `blyg_stamp.py`, which the template's placement can't honor.
 - [ ] `![[id@vN]]` is reserved: publishers MUST reject it at publish
       time.
-- [ ] Every directive MUST resolve to a local, currently-published
-      `kind: "fragment"` item — drafts, withdrawn items, unknown ids, and
-      threads are publish errors. "Currently" means after the same stamp
+- [ ] Every directive MUST resolve, or it's a publish error (§10.2): here,
+      to a local, currently-published `kind: "fragment"` item — drafts,
+      withdrawn items and unknown ids are errors by the spec, and threads
+      by this module's choice (above). "Currently" means after the same stamp
       run: fragments are planned before threads, so a fragment edited
       alongside a thread quoting it bakes its new version.
 - [ ] Resolution snapshots the target's latest published version, baked

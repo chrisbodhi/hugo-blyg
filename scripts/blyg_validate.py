@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Validate a built blyg surface (public/blyg/) against the ledger and
-blygger-spec docs/protocol-v0.2.md (pinned at c5884b9).
+blygger-spec docs/protocol-v0.3.md (pinned at 80c8d65).
 
 This is the build-side half of docs/conformance.md: everything
 scripts/blyg_stamp.py can't see because Hugo produces it -- the rendered
@@ -108,8 +108,9 @@ def _collect(content_html: str) -> _HTMLCollector:
 
 def check_content_html(where: str, content_html: str, origin: str,
                        public_blyg: Path, problems: Problems) -> None:
-    """§7: <description> HTML MUST be self-contained -- absolute media
-    URLs, no dependence on the origin's stylesheets or scripts -- and
+    """§5.2/§7: content_html MUST be self-contained -- every URL in it
+    absolute, footnote anchors included (0.3, decision #53), and no
+    dependence on the origin's stylesheets or scripts -- and
     §5.4: media MUST be immutable, which only files under the origin's
     media/ directory are held to (scripts/blyg_stamp.py)."""
     collector = _collect(content_html)
@@ -117,15 +118,13 @@ def check_content_html(where: str, content_html: str, origin: str,
     media_prefix = origin + "media/"
 
     for tag, attr, url in collector.refs:
-        if url == "" or url.startswith("#"):
-            continue  # in-document anchors (footnotes) travel with the HTML
         lowered = url.lower()
         if lowered.startswith("//"):
             url = "https:" + url
             lowered = url.lower()
         if not lowered.startswith(SAFE_SCHEMES):
             problems.add(where, f"<{tag} {attr}> has non-absolute URL {url!r} -- "
-                                f"content_html MUST be self-contained (§7)")
+                                f"every URL in content_html MUST be absolute (§5.2)")
             continue
         parts = urlsplit(url)
         on_origin = parts.netloc == origin_host
@@ -150,7 +149,7 @@ def check_manifest(public_blyg: Path, problems: Problems) -> dict | None:
     except (OSError, ValueError) as exc:
         problems.add("blyg.json", f"unreadable: {exc}")
         return None
-    expect = {"blyg": "0.2", "feed": "feed.xml", "items": "items/index.json"}
+    expect = {"blyg": "0.3", "feed": "feed.xml", "items": "items/index.json"}
     for key, value in expect.items():
         if manifest.get(key) != value:
             problems.add("blyg.json", f"{key} is {manifest.get(key)!r}, expected {value!r}")
@@ -280,14 +279,14 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
         problems.add(where, f"not JSON: {exc}")
         return None
 
-    if doc.get("blyg") != "0.2":
-        problems.add(where, f"blyg is {doc.get('blyg')!r}, expected '0.2'")
+    if doc.get("blyg") != "0.3":
+        problems.add(where, f"blyg is {doc.get('blyg')!r}, expected '0.3'")
     if doc.get("id") != blyg_id or not bs.is_valid_blyg_id(str(doc.get("id"))):
         problems.add(where, f"id {doc.get('id')!r} doesn't match file name / isn't a blyg id")
     if doc.get("origin") != origin:
         problems.add(where, f"origin {doc.get('origin')!r} != manifest site {origin!r}")
     if "forked_from" in doc:
-        problems.add(where, "carries 'forked_from', reserved for L2 (§5.6)")
+        problems.add(where, "carries 'forked_from', which hugo-blyg never emits (§5.6)")
 
     kind = doc.get("kind")
     withdrawn = bool(entry.get("withdrawn"))
@@ -295,7 +294,7 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
     if kind != expected_kind:
         problems.add(where, f"kind {kind!r}, ledger says {expected_kind!r}")
     if kind not in ("fragment", "thread", "withdrawn"):
-        problems.add(where, f"kind {kind!r} is not a 0.2 kind (§5.3)")
+        problems.add(where, f"kind {kind!r} is not a 0.3 kind (§5.3)")
 
     version = doc.get("version")
     if version != entry.get("version"):
@@ -373,6 +372,8 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
         problems.add(where, f"content_md's directives {[d[2] for d in directives]} don't match "
                             f"transclusions {[t['id'] for t in baked]} -- every directive "
                             f"MUST resolve, in directive order (§10.2, §10.3)")
+    for problem in bs.unsupported_grammar(content_md):
+        problems.add(where, f"content_md {problem}")
     check_content_html(where, content_html, origin, public_blyg, problems)
     collected = _collect(content_html)
     if collected.generated != len(doc.get("generated", [])):
@@ -846,10 +847,10 @@ def check_feed(public_blyg: Path, ledger: dict, docs: dict, manifest: dict,
         if entry.get("withdrawn"):
             if title != "withdrawn" or description:
                 problems.add(w, "a withdrawn item's entry has title `withdrawn` and empty description (§7)")
-        elif note and title != note:
+        elif not title:
+            problems.add(w, "every entry MUST carry a <title> (§7)")
+        elif note and title != note and not title.startswith(f"{note} \u2014 "):
             problems.add(w, f"entry drops its changelog note {note!r} (§7)")
-        if title is None and not description:
-            problems.add(w, "RSS 2.0 items need a title or a description")
         try:
             pub = email.utils.parsedate_to_datetime(item.findtext("pubDate") or "")
         except (TypeError, ValueError):

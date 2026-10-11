@@ -603,9 +603,52 @@ class TransclusionDirectiveTests(StampHelpers):
     def test_withdrawn_items_are_not_scanned(self):
         blyg_id = self.first()
         self.edit("post.md", "draft = false", "draft = false\nblyg_withdrawn = true")
-        self.edit("post.md", "Body.", f"![[{self.ID}]]")
+        self.edit("post.md", "Body.", f"![[{self.ID}]] [[{self.ID}]]")
         self.assertEqual(self.stamp()[0].kind, "withdraw")
         self.assertTrue(self.ledger()[blyg_id]["withdrawn"])
+
+
+class UnsupportedGrammarTests(StampHelpers):
+    """0.3 grammar this module doesn't build yet (§10.1) is refused, not
+    shipped with its 0.2 meaning."""
+
+    ID = "7c9wk2mhq0v3xj8tn5rzfd41bg"
+
+    def test_attached_blockquote_is_a_partial_transclusion(self):
+        write_post(self.content_dir, "t.md", FM, f"![[{self.ID}]]\n> a selection\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "partial transclusion"):
+            self.stamp()
+        self.assertFalse(self.ledger_path.exists())
+
+    def test_indented_attached_blockquote_is_a_partial_transclusion(self):
+        self.assertEqual(len(bs.unsupported_grammar(f"- item\n\n  ![[{self.ID}]]\n  > a selection\n")), 1)
+
+    def test_a_blank_line_detaches_the_blockquote(self):
+        self.assertEqual(bs.unsupported_grammar(f"![[{self.ID}]]\n\n> my own quote\n"), [])
+
+    def test_internal_link_is_refused(self):
+        write_post(self.content_dir, "t.md", FM, f"See [[{self.ID}]] for more.\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "plain internal link"):
+            self.stamp()
+        self.assertFalse(self.ledger_path.exists())
+
+    def test_internal_link_in_a_fragment_is_refused_too(self):
+        write_post(self.content_dir, "f.md", FM + 'blyg_kind = "fragment"\n',
+                   f"See [[{self.ID}]].\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "plain internal link"):
+            self.stamp()
+
+    def test_inert_link_forms_are_fine(self):
+        body = (f"In code, `[[{self.ID}]]` and ``a [[{self.ID}]] b`` are text.\n\n"
+                f"```\n[[{self.ID}]]\n```\n\n"
+                f"Inline ![[{self.ID}]] is text, not a link.\n\n"
+                f"[[notanid]] and [[{self.ID.upper()}]] aren't ids.\n")
+        self.assertEqual(bs.unsupported_grammar(body), [])
+        write_post(self.content_dir, "t.md", FM, body)
+        self.assertEqual(self.stamp()[0].kind, "new")
+
+    def test_a_link_between_code_spans_is_live(self):
+        self.assertEqual(len(bs.unsupported_grammar(f"`a` [[{self.ID}]] `b`\n")), 1)
 
 
 class TransclusionResolutionTests(StampHelpers):

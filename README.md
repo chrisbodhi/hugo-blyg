@@ -1,7 +1,7 @@
 # hugo-blyg
 
 A Hugo Module that builds the static publish-side surfaces of the
-[Blygger protocol](https://github.com/blygger/blygger-spec) v0.2, Level 1
+[Blygger protocol](https://blygger.org/spec/0.3/) v0.3, Level 1
 — `blyg.json` (manifest), `feed.xml`, `items/index.json` (archive index),
 `items/{id}.json` (canonical item documents), and, optionally,
 `blogroll.opml` (§11) — plus human-readable HTML pages for the feed,
@@ -115,7 +115,7 @@ own head, header, navigation and styles. Two optional touches in its
 {{ partial "blyg/head.html" . }}
 ```
 
-**CORS.** Protocol v0.2 §4 (SHOULD): public JSON/XML responses SHOULD
+**CORS.** Protocol v0.3 §4 (SHOULD): public JSON/XML responses SHOULD
 carry permissive CORS (`Access-Control-Allow-Origin: *`), since
 cross-origin reading by other clients depends on it. On Apache, this
 ships with the module as `static/blyg/.htaccess` — Hugo mounts an
@@ -208,22 +208,32 @@ who's read Hugo's own RSS template will already expect to see.
   that just means "not published yet"; after, it would 404 a published
   item, so the stamp script refuses it and the build fails on the
   orphaned ledger entry. Withdrawal is the only exit (§9).
-- `title` is never read. The item document schema (§5) has no title
-  field at all — fragments and threads are microblog-style, not
-  headlined essays. A feed entry's `<title>` is that publish event's
-  changelog **note**, when it has one: §7 says an entry "keeps its own
-  `blyg:version` and note", and the spec's own example carries the note
-  in `<title>`. The withdrawal event of a currently-withdrawn item is
-  titled `withdrawn`, literally, as §7 requires by name.
+- `title` is never read. Items are titleless (§5.3) — fragments and
+  threads are microblog-style, not headlined essays. A feed entry's
+  `<title>`, which every entry MUST carry (§7), is derived as §7
+  RECOMMENDS: that publish event's changelog **note**, an em dash, and
+  the first 80 or so characters of the item's latest text
+  (`note — excerpt`), or the excerpt alone when the event has no note.
+  The withdrawal event of a currently-withdrawn item is titled
+  `withdrawn`, literally, as §7 requires by name.
+- Two pieces of 0.3 grammar aren't built yet, and the stamp script
+  refuses them rather than publish them with their old meaning (§10.1):
+  a `![[id]]` directive with a blockquote directly under it (a partial
+  transclusion — put a blank line between to quote the whole item and
+  then your own blockquote), and an inline `[[id]]` outside code (a
+  plain internal link — use an ordinary markdown link to the item's
+  page, or put it in backticks).
+- A changelog note describes a change; it never reproduces withheld
+  content (§5.2). Where the previous version isn't pinned, a note MUST
+  NOT quote its text — nothing can check that, so it's on the author.
 
 ## Conformance level
 
 `blyg.json`'s `"level"` field (§3) comes from the consuming site's own
 `[params.blyg].level`, defaulting to `1` when unset. This module only
-accepts `1` — it fails the build on anything else. L2's real constructs
-(stub metadata, thread nesting, `forked_from`, webmention) arrive with
-protocol 0.3 and none are built, so a higher level would be a false
-conformance claim. Note the blogroll is optional at *every* level and
+accepts `1` — it fails the build on anything else. Level 1 is the
+single-origin protocol, carried into 0.3 from 0.2; the manifest's
+`"blyg": "0.3"` names the spec version, not the level (§3.1). Note the blogroll is optional at *every* level and
 never changes the level, and generation provenance (§5.7) is L1 — it
 only applies to versions that involved generation.
 
@@ -374,7 +384,9 @@ to force the write, discarding the value.
 
 ## Absolute URLs in `content_html`
 
-The protocol requires `content_html` to be self-contained (§7). Render
+The protocol requires every URL in `content_html` to be absolute (§5.2),
+since the same bytes travel as the feed `<description>`, into other
+readers' stores, and into other origins' threads. Render
 hooks on the markdown image/link AST aren't enough on their own if the
 consuming site has shortcodes that inject raw HTML with root-relative
 URLs outside those AST nodes entirely (a real case in the site this was
@@ -387,8 +399,14 @@ Hugo's regex engine (RE2) has none. The attribute list also covers
 `poster`, `cite`, `action` and friends, and two more passes handle every
 candidate inside `srcset` and `url(...)` in inline styles. This catches
 shortcode-injected markup and ordinary markdown images/links in one pass, so no render hooks are
-needed. Page-relative URLs (`other/page`) can't be rewritten — an item
-has no page of its own to be relative to — so
+needed. An in-document anchor (`#fn:1`, a footnote) is made absolute
+against the item's own page, `f/{id}/` or `t/{id}/` — the same URL with
+pages on or off, so `content_html` doesn't depend on that setting — and
+a fragment quoted into a thread keeps its anchors pointing at the
+fragment's page, exactly as in its own `content_html`. All of it lives
+in `partials/blyg/absolute-urls.html`. Page-relative URLs (`other/page`)
+can't be rewritten — they'd resolve against whichever page showed the
+item — so
 `scripts/blyg_validate.py` fails the build on them, and on anything
 else the rewrite can't make self-contained.
 
@@ -416,8 +434,10 @@ The same text inline, or inside a fenced code block, is inert. The
 whitespace around a directive must be spaces and tabs: anything else
 (a non-breaking space, say) is refused at stamp time, since Markdown
 wouldn't read the line as a block of its own. Only
-threads transclude, only same-origin fragments can be transcluded (0.2 is
-local-only), and the reserved `![[id@vN]]` form is refused.
+threads transclude, only this site's own fragments can be transcluded
+(0.3 allows threads and other origins' items too, which this module
+doesn't build), and the reserved `![[id@vN]]` form is refused, as is a
+partial transclusion (see "Content contract").
 
 **Resolution happens in `blyg_stamp.py`, at publish time, never in the
 build.** Hugo rebuilds everything on every deploy, so a template that
@@ -631,7 +651,7 @@ metadata block), and each `time` element carries its ISO 8601 timestamp.
 On the feed page an `<hr>` sits between items, so they read apart
 without a stylesheet; `.blyg > hr { display: none }` hides it.
 `.stub-cite`, the reference client's "In response to" line, will sit
-above an item's `div.item-content` once protocol 0.3's stubs are built.
+above an item's `div.item-content` once this module builds stubs (§10.6).
 
 To change what the pages say, override a partial in the site's own
 `layouts/partials/blyg/view/`. Each piece is its own, so a site can
@@ -721,8 +741,10 @@ included. To write one literally, use Hugo's escaped form,
 
 ## Not yet built
 
-Nothing on the 0.2 publish side. L2's constructs (stub metadata, thread
-nesting, `forked_from`, webmention) arrive with protocol 0.3.
+0.3's grammar for partial transclusions and `[[id]]` links (refused for
+now, see "Content contract"), quoting threads, and its Level 2
+cross-client constructs: the `page` field, stubs, lineage
+(`forked_from`), `cited`, and Webmention. All of them are optional to emit.
 
 ## Developing hugo-blyg
 

@@ -1,5 +1,5 @@
 {{- /*
-  Builds one blyg item document (protocol-v0.2 §5) as a Hugo dict, via
+  Builds one blyg item document (protocol-v0.3 §5) as a Hugo dict, via
   Hugo's partial-return-value feature -- the caller does:
 
     {{ $doc := partial "blyg/item.html" (dict "page" $page "ledger" $entry "base" $base) }}
@@ -56,19 +56,14 @@
     {{- errorf "blyg: %s body hashes to %s but the ledger says %s -- run scripts/blyg_stamp.py before building (shipping this would be a same-version stealth edit, §13.3)" $file $hash $entry.last_hash -}}
   {{- end -}}
   {{- /*
-    content_html must be self-contained (§7): absolute URLs everywhere.
-    Render hooks alone don't cover shortcodes that emit raw HTML with
-    root-relative URLs (an <img> whose src went through relURL, an
-    injected <script src="/js/...">), so this rewrites the fully
-    rendered HTML directly: every root-relative URL attribute (either quote style), every candidate
-    inside srcset, and url(...) in inline styles. RE2 (Hugo's regex
-    engine) has no lookahead, hence capturing-and-replaying the char
-    after the slash rather than a negative lookahead, to skip
-    protocol-relative "//" URLs without one. Page-relative URLs can't be
-    rewritten at all (items have no page of their own to be relative
-    to); scripts/blyg_validate.py fails the build on any that remain.
+    content_html must be self-contained (§5.2): every URL absolute.
+    partials/blyg/absolute-urls.html rewrites the rendered HTML; an
+    in-document "#..." anchor resolves against the item's own page --
+    the same URL partials/blyg/permalink.html gives it whether or not
+    the site builds pages, so the bytes don't depend on that setting.
   */ -}}
   {{- $html := printf "%s" $page.Content -}}
+  {{- $self := partial "blyg/permalink.html" (dict "id" $page.Params.blyg_id "kind" $entry.kind "base" $base) -}}
 
   {{- /*
     Transclusion (§10.2). scripts/blyg_stamp.py resolves each `![[id]]`
@@ -105,6 +100,13 @@
       {{- if ne (trim $line " \t\r") (printf "![[%s]]" $s.id) -}}
         {{- errorf "blyg: %s body line %d is %q, but the ledger bakes ![[%s]] there -- rerun scripts/blyg_stamp.py" $file $n $line $s.id -}}
       {{- end -}}
+      {{- /* §10.1 (0.3): a blockquote attached to the directive makes it a
+             partial transclusion, which this module doesn't build; baking
+             the whole item there would misquote. blyg_stamp.py refuses it
+             first. */ -}}
+      {{- if and (lt $n (len $lines)) (hasPrefix (strings.TrimLeft " \t" (index $lines $n)) ">") -}}
+        {{- errorf "blyg: %s body line %d: ![[%s]] is followed directly by a blockquote, which 0.3 reads as a partial transclusion (§10.1) -- hugo-blyg doesn't build those; put a blank line between them" $file $n $s.id -}}
+      {{- end -}}
       {{- if ne (printf "sha256:%s" (crypto.SHA256 (partial "blyg/content-md.html" $s.content_md))) $s.content_hash -}}
         {{- errorf "blyg: %s: the ledger's snapshot of %s v%v doesn't match its content_hash -- a baked snapshot MUST NOT change without a new thread version (§10.4)" $file $s.id $s.version -}}
       {{- end -}}
@@ -113,12 +115,19 @@
       {{- if not $source -}}
         {{- errorf "blyg: %s transcludes %s, which has no page on this site" $file $s.id -}}
       {{- end -}}
+      {{- /* Made absolute in the source's own page context, exactly as the
+             source's own content_html was -- a quoted footnote anchor
+             points at the source's page, not this thread's. */ -}}
+      {{- $sourcePage := partial "blyg/permalink.html" (dict "id" $s.id "kind" (index site.Data.blyg.ledger $s.id).kind "base" $base) -}}
       {{- $token := printf "blygtransclusion%sn%d" $salt $i -}}
       {{- $indent := index (findRE `^[ \t]*` $line 1) 0 | default "" -}}
       {{- $bakes = $bakes | append (dict
           "token" $token "line" $n "indent" $indent
           "html" (printf `<blockquote class="blyg-transclusion" data-blyg-id="%s" data-blyg-version="%d">%s</blockquote>`
-                   $s.id (int $s.version) ($source.RenderString (dict "display" "block") $s.content_md))
+                   $s.id (int $s.version)
+                   (partial "blyg/absolute-urls.html" (dict
+                     "html" (printf "%s" ($source.RenderString (dict "display" "block") $s.content_md))
+                     "base" $base "page" $sourcePage)))
       ) -}}
     {{- end -}}
     {{- $out := slice -}}
@@ -141,15 +150,7 @@
       {{- $html = replace $html $para .html -}}
     {{- end -}}
   {{- end -}}
-  {{- $html = replaceRE `(\s(?:src|href|poster|cite|action|formaction|data|background|longdesc))=(["'])/([^/"'])` (printf "${1}=${2}%s/${3}" $base) $html -}}
-  {{- $html = replaceRE `url\((["']?)/([^/"')])` (printf "url(${1}%s/${2}" $base) $html -}}
-  {{- range findRESubmatch `\ssrcset=(["'])([^"']*)["']` $html -}}
-    {{- $value := index . 2 -}}
-    {{- $fixed := replaceRE `(^|,)(\s*)/([^/])` (printf "${1}${2}%s/${3}" $base) $value -}}
-    {{- if ne $fixed $value -}}
-      {{- $html = replace $html (index . 0) (replace (index . 0) $value $fixed) -}}
-    {{- end -}}
-  {{- end -}}
+  {{- $html = partial "blyg/absolute-urls.html" (dict "html" $html "base" $base "page" $self) -}}
   {{- $contentHTML = $html -}}
 
   {{- /*
@@ -212,7 +213,7 @@
 {{- $lastEntry := index $changelog (sub (len $changelog) 1) -}}
 
 {{- $doc := dict
-  "blyg" "0.2"
+  "blyg" "0.3"
   "id" $page.Params.blyg_id
   "kind" $kind
   "origin" $origin

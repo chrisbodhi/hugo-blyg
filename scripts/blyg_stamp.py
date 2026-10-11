@@ -2,7 +2,7 @@
 """Stamp content/blyg/*.md with blyg ids and maintain data/blyg/ledger.json.
 
 See docs/conformance.md for the protocol rules this implements
-(blygger-spec docs/protocol-v0.2.md, pinned at c5884b9).
+(blygger-spec docs/protocol-v0.3.md, pinned at 80c8d65).
 
 Usage:
     blyg_stamp.py                 stamp everything, write changes
@@ -58,8 +58,17 @@ FRONT_MATTER_OPEN = "+++\n"
 # is reserved and MUST be rejected at publish time. Anything else that
 # merely looks similar is inert text.
 DIRECTIVE_RE = re.compile(r"^\s*!\[\[(" + BLYG_ID_RE_SRC + r")(@v[0-9]+)?\]\]\s*$")
+# §10.1 (0.3): the unprefixed inline form `[[` + id + `]]`, anywhere
+# outside code, is a plain internal link. hugo-blyg doesn't render these
+# yet, so blyg_stamp.py refuses them rather than ship the literal text.
+# A `!`-prefixed one is a directive on a line of its own and inert text
+# anywhere else, never a link.
+INTERNAL_LINK_RE = re.compile(r"(?<!!)\[\[(" + BLYG_ID_RE_SRC + r")\]\]")
+# An inline code span: a backtick run, then anything up to the next run
+# of the same length.
+CODE_SPAN_RE = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)")
 # A fence line: the fence and whatever follows it (an opener's info
-# string). find_directives applies the rest of CommonMark's rule.
+# string). live_lines applies the rest of CommonMark's rule.
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 # §5.7: a machine-generated span is marked in the source with the module's
@@ -319,11 +328,9 @@ def authored_gen(spans: list) -> tuple[str, ...]:
                             sort_keys=True) for s in spans)
 
 
-def find_directives(body: str) -> list[tuple[int, str, bool]]:
-    """Every transclusion-directive line in `body`, as (line number,
-    line, is_reserved_versioned_form). Lines inside fenced code blocks
-    are inert text (§10.1) and skipped."""
-    found = []
+def live_lines(body: str):
+    """(line number, line) for every line of `body` outside fenced code
+    blocks, whose contents are inert text (§10.1)."""
     fence: str | None = None
     for lineno, line in enumerate(body.split("\n"), start=1):
         m = FENCE_RE.match(line)
@@ -339,10 +346,46 @@ def find_directives(body: str) -> list[tuple[int, str, bool]]:
                     and not m.group(2).strip():
                 fence = None
             continue
+        yield lineno, line
+
+
+def find_directives(body: str) -> list[tuple[int, str, bool]]:
+    """Every transclusion-directive line in `body`, as (line number,
+    line, is_reserved_versioned_form). Lines inside fenced code blocks
+    are inert text (§10.1) and skipped."""
+    found = []
+    for lineno, line in live_lines(body):
         d = DIRECTIVE_RE.match(line)
         if d:
             found.append((lineno, line.strip(), d.group(2) is not None))
     return found
+
+
+def unsupported_grammar(body: str) -> list[str]:
+    """0.3 grammar (§10.1) this module doesn't build yet, one message per
+    use: a partial transclusion -- a directive with a blockquote attached,
+    no blank line between -- and a plain internal link `[[id]]` outside
+    code. Both change what 0.2 bytes mean (a whole quote followed by the
+    author's own blockquote; literal text), so shipping either as before
+    would be wrong under 0.3, and they're refused instead."""
+    problems = []
+    lines = body.split("\n")
+    for lineno, line, _ in find_directives(body):
+        if lineno < len(lines) and lines[lineno].lstrip(" \t").startswith(">"):
+            problems.append(
+                f"body line {lineno}: {line!r} is followed directly by a "
+                f"blockquote, which 0.3 reads as a partial transclusion "
+                f"(§10.1) -- hugo-blyg doesn't build those yet. Put a blank "
+                f"line between them to quote the whole item, followed by "
+                f"your own blockquote.")
+    for lineno, line in live_lines(body):
+        for m in INTERNAL_LINK_RE.finditer(CODE_SPAN_RE.sub("", line)):
+            problems.append(
+                f"body line {lineno}: {m.group(0)!r} is a plain internal link "
+                f"(§10.1, 0.3) -- hugo-blyg doesn't render those yet. Link "
+                f"the item's page with an ordinary markdown link, or put it "
+                f"in backticks or a code fence to keep it as text.")
+    return problems
 
 
 def check_directives(path: Path, body: str, kind: str) -> None:
@@ -373,6 +416,8 @@ def check_directives(path: Path, body: str, kind: str) -> None:
                 f"directive (§10.1), but only threads transclude -- set "
                 f"blyg_kind = \"thread\", or put it inside a code fence to "
                 f"keep it as inert text.")
+    for problem in unsupported_grammar(body):
+        raise BlygStampError(f"{path}: {problem}")
 
 
 # resolve(target_id) -> (version, content_md) for a fragment that is
@@ -915,7 +960,7 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
         if item is None or target not in ledger:
             return f"{target} isn't a published item on this origin (unknown id or draft)"
         if item.kind != "fragment":
-            return f"{target} is a thread; only fragments can be transcluded at 0.2"
+            return f"{target} is a thread; hugo-blyg only transcludes fragments"
         if item.withdrawn_flag:
             return f"{target} is withdrawn"
         return after[target]["version"], item.body
