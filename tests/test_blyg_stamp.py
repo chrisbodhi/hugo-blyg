@@ -730,16 +730,88 @@ class TransclusionResolutionTests(StampHelpers):
         with self.assertRaisesRegex(bs.BlygStampError, "unknown id or draft"):
             self.stamp()
 
-    def test_thread_target_is_refused(self):
-        other = self.first("b-thread.md")
-        self.thread("a-thread.md", other)
-        with self.assertRaisesRegex(bs.BlygStampError, "is a thread"):
-            self.stamp()
+    def test_a_thread_target_bakes_its_own_snapshots_nested(self):
+        # §10.2: nesting is nested blockquotes -- the quoted thread's
+        # snapshot carries the snapshots its own version baked.
+        self.thread("b-thread.md", self.frag)
+        inner = self.stamp()[0].blyg_id
+        inner_snapshots = self.ledger()[inner]["transclusions"]
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        [t] = self.ledger()[outer]["transclusions"]
+        self.assertEqual(t, {
+            "id": inner, "version": 1, "line": 3, "kind": "thread",
+            "content_hash": bs.content_hash(f"Intro.\n\n![[{self.frag}]]\n"),
+            "content_md": f"Intro.\n\n![[{self.frag}]]\n",
+            "transclusions": inner_snapshots})
+
+    def test_a_thread_without_directives_nests_nothing(self):
+        inner = self.first("b-thread.md")
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        [t] = self.ledger()[outer]["transclusions"]
+        self.assertEqual((t["kind"], t["transclusions"]), ("thread", []))
+
+    def test_quoted_threads_are_planned_before_their_quoters(self):
+        # a-thread sorts first but quotes b-thread: one run that edits
+        # both still bakes b-thread's new version (§10.2's then-latest).
+        inner = self.first("b-thread.md")
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        self.edit("b-thread.md", "Body.", "Body, v2.")
+        self.edit("a-thread.md", "Intro.", "Intro, v2.")
+        self.stamp()
+        [t] = self.ledger()[outer]["transclusions"]
+        self.assertEqual((t["version"], t["content_md"]), (2, "Body, v2.\n"))
+
+    def test_editing_a_quoted_thread_leaves_the_quoter_alone(self):
+        inner = self.first("b-thread.md")
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        before = self.ledger()[outer]
+        self.edit("b-thread.md", "Body.", "Rewritten.")
+        self.stamp()
+        self.assertEqual(self.ledger()[outer], before)
 
     def test_a_thread_can_not_transclude_itself(self):
         thread_id = self.first("a-thread.md")
         self.edit("a-thread.md", "Body.", f"![[{thread_id}]]")
-        with self.assertRaisesRegex(bs.BlygStampError, "is a thread"):
+        with self.assertRaisesRegex(bs.BlygStampError, "can't transclude itself"):
+            self.stamp()
+
+    def test_a_thread_can_not_quote_a_thread_that_quotes_it(self):
+        # §10.2's closure check, one level and two levels deep.
+        a = self.first("a-thread.md")
+        self.thread("b-thread.md", a)
+        b = self.stamp()[1].blyg_id
+        self.edit("a-thread.md", "Body.", f"![[{b}]]")
+        with self.assertRaisesRegex(bs.BlygStampError, "MUST NOT quote one that quotes it"):
+            self.stamp()
+        self.edit("a-thread.md", f"![[{b}]]", "Body.")
+        self.thread("c-thread.md", b)
+        c = self.stamp()[2].blyg_id
+        self.edit("a-thread.md", "Body.", f"![[{c}]]")
+        with self.assertRaisesRegex(bs.BlygStampError, "MUST NOT quote one that quotes it"):
+            self.stamp()
+
+    def test_republishing_against_a_withdrawn_thread_is_refused(self):
+        inner = self.first("b-thread.md")
+        self.thread("a-thread.md", inner)
+        self.stamp()
+        self.edit("b-thread.md", "draft = false", "draft = false\nblyg_withdrawn = true")
+        self.edit("a-thread.md", "Intro.", "Intro, edited.")
+        with self.assertRaisesRegex(bs.BlygStampError, "is withdrawn"):
+            self.stamp()
+
+    def test_a_tampered_nested_snapshot_is_refused(self):
+        self.thread("b-thread.md", self.frag)
+        inner = self.stamp()[0].blyg_id
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        ledger = self.ledger()
+        ledger[outer]["transclusions"][0]["transclusions"][0]["content_md"] = "Forged.\n"
+        bs.save_ledger(self.ledger_path, ledger)
+        with self.assertRaisesRegex(bs.BlygStampError, "doesn't match its content_hash"):
             self.stamp()
 
     def test_directive_in_a_fragment_is_refused(self):
@@ -874,6 +946,28 @@ class TransclusionResolutionTests(StampHelpers):
         entry = self.ledger()[thread_id]
         self.assertEqual(entry["version"], 1)
         self.assertEqual(entry["transclusions"][0]["version"], 1)
+
+    def test_amend_re_resolving_a_quoted_thread_reaches_its_quoter(self):
+        # The fragment's unshipped v2 is rewritten; b-thread baked it, and
+        # a-thread baked b-thread -- both follow, inner first.
+        self.thread("b-thread.md", self.frag)
+        inner = self.stamp()[0].blyg_id
+        self.thread("a-thread.md", inner)
+        outer = self.stamp()[0].blyg_id
+        shipped = self.ledger()
+        self.edit("z-frag.md", "Quoted.", "Draft.")
+        self.edit("b-thread.md", "Intro.", "Edited.")
+        self.edit("a-thread.md", "Intro.", "Edited.")
+        self.stamp(published=shipped)
+        self.edit("z-frag.md", "Draft.", "Final.")
+        plans = {p.path.name: p for p in self.stamp(published=shipped)}
+        self.assertEqual(plans["b-thread.md"].kind, "amend")
+        self.assertEqual(plans["a-thread.md"].kind, "amend")
+        [t] = self.ledger()[outer]["transclusions"]
+        self.assertEqual(t["transclusions"][0]["content_md"], "Final.\n")
+        self.assertEqual(t["transclusions"], self.ledger()[inner]["transclusions"])
+        kinds = {p.kind for p in self.stamp(published=shipped)}
+        self.assertEqual(kinds, {"noop"})
 
     def test_amend_withdrawing_a_baked_unshipped_source_is_refused(self):
         # The unshipped v2 the thread baked is rewritten into an endcap, so

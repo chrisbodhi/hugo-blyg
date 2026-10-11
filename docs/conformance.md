@@ -372,9 +372,10 @@ marked with the module's `blyg-gen` shortcode and disclosed as
 created — never at build time, which would change a thread's
 `content_html` without a version bump whenever a source fragment changed,
 breaking §10.4. The stamp script stores each directive's line, resolved
-version, and that version's `content_md` in the thread's ledger entry;
-`item.html` renders the stored Markdown in the fragment's own page
-context, which reproduces the fragment's `content_html` byte for byte
+version, and that version's `content_md` in the thread's ledger entry
+(and, for a quoted thread, that version's own snapshots, nested);
+`bake.html` renders the stored Markdown in the source's own page
+context, recursively, which reproduces the source's `content_html` byte for byte
 (verified against Hugo 0.151.0, shortcodes and footnotes included, and
 re-checked by `blyg_validate.py` wherever that version's HTML is still
 served). The trade-off: like every item's own `content_html`, a baked
@@ -383,12 +384,20 @@ markup-config change can change its bytes, but never its content. See
 the README's "Transclusion". `tests/transclusion_e2e.sh` proves the
 no-cascade rule against real builds in CI.)*
 
-- [ ] Transclusion targets are fragments of this origin. 0.3 lifts both
-      restrictions (threads, and imported items from other origins, may
-      be quoted), but what a publisher quotes is its own choice, and this
-      module only resolves local fragments. Only threads transclude: a
-      directive in a fragment is refused (a fragment has no
-      `transclusions` to record it in).
+- [ ] Transclusion targets are this origin's fragments and threads
+      (§10.2 step 1). 0.3 also allows imported items from other origins,
+      but what a publisher quotes is its own choice, and this module only
+      resolves local items. Only threads transclude: a directive in a
+      fragment is refused (a fragment has no `transclusions` to record it
+      in).
+- [ ] Nesting is nested blockquotes: a quoted thread's bake is its own
+      `content_html`, its quotes baked inside, and `transclusions` names
+      the direct quote only (§10.3). `blyg_validate.py` counts only
+      top-level wrappers against it.
+- [ ] One local closure check (§10.2): a thread MUST NOT transclude a
+      local thread whose transitive closure, walked via stored
+      `transclusions`, contains it — itself included. `blyg_stamp.py`
+      refuses one; `blyg_validate.py` flags a cycle on the wire.
 - [ ] 0.3 grammar this module doesn't build is refused, never shipped
       with its 0.2 meaning (`unsupported_grammar` in `blyg_stamp.py`, run
       by the stamp and again by `blyg_validate.py` on every `content_md`):
@@ -413,11 +422,11 @@ no-cascade rule against real builds in CI.)*
 - [ ] `![[id@vN]]` is reserved: publishers MUST reject it at publish
       time.
 - [ ] Every directive MUST resolve, or it's a publish error (§10.2): here,
-      to a local, currently-published `kind: "fragment"` item — drafts,
-      withdrawn items and unknown ids are errors by the spec, and threads
-      by this module's choice (above). "Currently" means after the same stamp
-      run: fragments are planned before threads, so a fragment edited
-      alongside a thread quoting it bakes its new version.
+      to a local, currently-published item — drafts, withdrawn items and
+      unknown ids are errors. "Currently" means after the same stamp run:
+      fragments are planned first, then each thread after the threads it
+      quotes, so a source edited alongside a thread quoting it bakes its
+      new version.
 - [ ] Resolution snapshots the target's latest published version, baked
       into the thread's `content_html` as
       `<blockquote class="blyg-transclusion" data-blyg-id="{id}"
@@ -431,9 +440,9 @@ no-cascade rule against real builds in CI.)*
 - [ ] Thread item documents carry a top-level `transclusions` array in
       directive order; fragments omit the key entirely; threads always
       carry it, even as `[]` for a withdrawn thread. Each `{id, version}`
-      names a version its source published as a fragment
+      names a version its source published with content, not an endcap
       (`blyg_validate.py` checks the ledger's changelog).
-- [ ] Later edits, withdrawal, or pinning of a source fragment do **not**
+- [ ] Later edits, withdrawal, or pinning of a source do **not**
       change a thread's already-baked snapshot (no cascade): an unchanged
       thread is never re-resolved, and the template bakes only from the
       ledger's stored snapshot.

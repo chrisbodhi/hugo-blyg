@@ -420,9 +420,11 @@ def check_directives(path: Path, body: str, kind: str) -> None:
         raise BlygStampError(f"{path}: {problem}")
 
 
-# resolve(target_id) -> (version, content_md) for a fragment that is
-# published after this run, or a string saying why it can't be transcluded.
-Resolver = Callable[[str], "tuple[int, str] | str"]
+# resolve(target_id, drawing_item_id) -> (version, source body, nested
+# snapshots) for an item that is published after this run -- nested is
+# None for a fragment, and a thread's own snapshots at that version for a
+# thread -- or a string saying why it can't be transcluded.
+Resolver = Callable[[str, "str | None"], "tuple[int, str, list | None] | str"]
 
 # stale(snapshot) -> why a stored snapshot no longer names what its
 # source's version holds after this run, or None if it still does.
@@ -445,41 +447,60 @@ def snapshot_staleness(snapshot: dict, source: dict | None) -> str | None:
         return (f"{sid} v{version} was undone (the source is at "
                 f"v{source['version']} now)")
     if version == source["version"] and (
-            source["withdrawn"] or source["kind"] != "fragment"
-            or source["last_hash"] != snapshot.get("content_hash")):
+            source["withdrawn"] or source["kind"] != snapshot.get("kind", "fragment")
+            or source["last_hash"] != snapshot.get("content_hash")
+            or (source["kind"] == "thread"
+                and source.get("transclusions", []) != snapshot.get("transclusions", []))):
         return f"{sid} v{version} was rewritten in place"
     return None
 
 
 def resolve_directives(item: "Item", resolve: Resolver) -> list[dict]:
     """§10.2: snapshot every directive's target at its latest published
-    version, in directive order. The snapshot is the fragment's
-    content_md at that version -- the template renders it in the
-    fragment's own page context, which reproduces the fragment's
-    content_html byte for byte (blyg_validate.py checks exactly that
-    whenever the fragment still sits at the baked version). Storing it
-    here, at publish time, is what keeps later edits to the fragment
-    from reaching an already-published thread (§10.4).
+    version, in directive order. The snapshot is the source's content_md
+    at that version -- the template renders it in the source's own page
+    context, which reproduces the source's content_html byte for byte
+    (blyg_validate.py checks exactly that whenever the source still sits
+    at the baked version). Storing it here, at publish time, is what
+    keeps later edits to the source from reaching an already-published
+    thread (§10.4).
 
-    Strictly, what's stored is the fragment's source body: its
-    content_md plus any blyg-gen markers, since those are what render
-    its generated spans' wrappers (§5.7). content_hash is over the
-    stripped content_md, as the fragment's own is. With no markers the
-    two are the same text."""
+    Strictly, what's stored is the source body: its content_md plus any
+    blyg-gen markers, since those are what render its generated spans'
+    wrappers (§5.7). content_hash is over the stripped content_md, as
+    the source's own is. With no markers the two are the same text.
+
+    A thread source's snapshot also carries "kind": "thread" and that
+    version's own snapshots, nested -- its content_html bakes them, so
+    they're part of what's quoted, and nesting is nested blockquotes.
+    A fragment's has neither, exactly as before threads were quotable."""
     snapshots = []
     for lineno, line, _ in find_directives(item.body):
         target = DIRECTIVE_RE.match(line).group(1)
-        resolved = resolve(target)
+        resolved = resolve(target, item.blyg_id)
         if isinstance(resolved, str):
             raise BlygStampError(
                 f"{item.path}: body line {lineno}: {line!r} can't be resolved: "
                 f"{resolved} -- every directive MUST resolve to a local, "
-                f"currently-published fragment (§10.2)")
-        version, source = resolved
-        snapshots.append({"id": target, "version": version, "line": lineno,
-                          "content_hash": content_hash(strip_gen_markers(source)),
-                          "content_md": source})
+                f"currently-published item (§10.2)")
+        version, source, nested = resolved
+        snapshot = {"id": target, "version": version, "line": lineno,
+                    "content_hash": content_hash(strip_gen_markers(source)),
+                    "content_md": source}
+        if nested is not None:
+            snapshot["kind"] = "thread"
+            snapshot["transclusions"] = nested
+        snapshots.append(snapshot)
     return snapshots
+
+
+def snapshot_hash_mismatches(snapshots: list[dict]):
+    """Every snapshot, nested ones included, whose stored content_md no
+    longer hashes to its content_hash."""
+    for s in snapshots:
+        if s.get("content_hash") != content_hash(strip_gen_markers(s.get("content_md", ""))):
+            yield s
+        yield from snapshot_hash_mismatches(s.get("transclusions", []))
 
 
 def set_transclusions(entry: dict, snapshots: list[dict]) -> None:
@@ -508,12 +529,11 @@ def check_stored_transclusions(item: "Item", entry: dict) -> None:
             f"{item.path}: ledger entry {item.blyg_id} records transclusions "
             f"{got} but the body's directives are {want} -- the ledger was "
             f"edited by hand; restore it rather than re-resolving silently")
-    for s in stored:
-        if s.get("content_hash") != content_hash(strip_gen_markers(s.get("content_md", ""))):
-            raise BlygStampError(
-                f"ledger entry {item.blyg_id}: the snapshot of {s.get('id')} "
-                f"v{s.get('version')} doesn't match its content_hash -- a baked "
-                f"snapshot MUST NOT change without a new thread version (§10.4)")
+    for s in snapshot_hash_mismatches(stored):
+        raise BlygStampError(
+            f"ledger entry {item.blyg_id}: the snapshot of {s.get('id')} "
+            f"v{s.get('version')} doesn't match its content_hash -- a baked "
+            f"snapshot MUST NOT change without a new thread version (§10.4)")
 
 
 def parse_date_utc(value: str) -> datetime.datetime:
@@ -955,15 +975,36 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
     by_id = {item.blyg_id: item for item in items if item.blyg_id is not None}
     after: dict[str, dict] = {}  # id -> ledger entry once this run is applied
 
-    def resolve(target: str) -> tuple[int, str] | str:
+    def closure(target: str) -> set[str]:
+        """Every local item `target` transcludes, transitively, walked via
+        the stored transclusions as they stand after this run."""
+        seen: set[str] = set()
+        todo = [target]
+        while todo:
+            entry = after.get(todo.pop()) or {}
+            for s in entry.get("transclusions", []):
+                if s["id"] not in seen:
+                    seen.add(s["id"])
+                    todo.append(s["id"])
+        return seen
+
+    def resolve(target: str, drawing: str | None) -> tuple[int, str, list | None] | str:
         item = by_id.get(target)
         if item is None or target not in ledger:
             return f"{target} isn't a published item on this origin (unknown id or draft)"
-        if item.kind != "fragment":
-            return f"{target} is a thread; hugo-blyg only transcludes fragments"
         if item.withdrawn_flag:
             return f"{target} is withdrawn"
-        return after[target]["version"], item.body
+        if item.kind == "fragment":
+            return after[target]["version"], item.body, None
+        # §10.2's one local closure check: a thread MUST NOT quote a thread
+        # that quotes it back, at any depth -- itself included.
+        if target == drawing:
+            return f"{target} is this thread; a thread can't transclude itself"
+        if target not in after or (drawing is not None and drawing in closure(target)):
+            return (f"{target} transcludes this thread, directly or through other "
+                    f"threads, and a thread MUST NOT quote one that quotes it (§10.2)")
+        return (after[target]["version"], item.body,
+                copy.deepcopy(after[target].get("transclusions", [])))
 
     def stale(snapshot: dict) -> str | None:
         source = after.get(snapshot.get("id")) or ledger.get(snapshot.get("id"))
@@ -990,17 +1031,29 @@ def run_stamp(content_dir: Path, ledger_path: Path, *, write: bool,
             return f"{target} v{version} is a withdrawal endcap, with no content to draw on"
         return version
 
-    # Fragments first, so a thread stamped in the same run bakes the
-    # version this run gives its sources -- the then-latest (§10.2).
-    # Then items only now becoming threads (they were fragments, so a
-    # thread's snapshot may name them), then everything already a thread,
-    # which is all that can hold snapshots to check for staleness.
-    # Plans are still reported in file order.
-    def tier(item: Item) -> int:
-        if item.kind != "thread":
-            return 0
-        return 2 if ledger.get(item.blyg_id or "", {}).get("kind") == "thread" else 1
-    order = sorted(range(len(items)), key=lambda i: tier(items[i]))
+    # Every source before anything that quotes it, so a thread stamped in
+    # the same run bakes the version this run gives its sources -- the
+    # then-latest (§10.2) -- and a stale snapshot of a source this
+    # --amend run re-resolved is seen as stale. Fragments first, then
+    # threads, each after the threads its body quotes. A cycle can't be
+    # ordered, and resolve() refuses it (§10.2's closure check). Plans
+    # are still reported in file order.
+    index_of = {item.blyg_id: i for i, item in enumerate(items) if item.blyg_id}
+    order = [i for i, item in enumerate(items) if item.kind != "thread"]
+    placed: set[int] = set(order)
+
+    def place(i: int, visiting: set[int]) -> None:
+        if i in placed or i in visiting:
+            return
+        visiting.add(i)
+        for _, line, _ in find_directives(items[i].body):
+            j = index_of.get(DIRECTIVE_RE.match(line).group(1))
+            if j is not None:
+                place(j, visiting)
+        placed.add(i)
+        order.append(i)
+    for i in range(len(items)):
+        place(i, set())
     by_index: dict[int, Plan] = {}
     for i in order:
         item = items[i]

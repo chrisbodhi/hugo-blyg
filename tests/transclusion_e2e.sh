@@ -3,9 +3,12 @@
 # scratch copy of exampleSite/: editing, re-stamping, and then withdrawing
 # the transcluded fragment leaves the thread's built content_html
 # byte-identical, until the thread itself is re-stamped -- which then
-# re-resolves to the fragment's then-latest version (§10.2).
+# re-resolves to the fragment's then-latest version (§10.2). Then a thread
+# quoting that thread bakes it with its own quote nested inside, and the
+# quoted thread can't quote back (§10.2's closure check).
 #
-# Run from anywhere (GNU sed); needs hugo, go and python3 on PATH. CI runs it.
+# Run from anywhere, with GNU or BSD (macOS) sed; needs hugo, go and
+# python3 on PATH. CI runs it.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -50,8 +53,9 @@ build
 echo "ok: an edited, re-stamped fragment leaves the thread byte-identical"
 
 # 2. Withdraw the fragment: still no cascade.
-sed -i.bak 's/^blyg_kind = "fragment"$/blyg_kind = "fragment"\nblyg_withdrawn = true/' "$fragment_md" \
-  && rm "$fragment_md.bak"
+sed -i.bak '/^blyg_kind = "fragment"$/a\
+blyg_withdrawn = true
+' "$fragment_md" && rm "$fragment_md.bak"
 stamp
 build
 [ "$(field $fragment 'd["kind"]')" = withdrawn ] || fail "fragment wasn't withdrawn"
@@ -99,3 +103,31 @@ if field $thread 'd["content_html"]' | grep -q "href=\"#"; then
   fail "the thread's content_html still carries a relative #anchor"
 fi
 echo "ok: footnote anchors are absolute, quoted ones against their source's page"
+
+# 6. A thread quoting that thread bakes the thread's content_html, its own
+#    quote of the fragment nested inside (§10.2); only the direct quote is
+#    provenance (§10.3). blyg_validate.py (in build) checks the bake is
+#    byte-identical to the quoted thread's own content_html.
+outer_md=content/blyg/2026-09-06-quoting-thread.md
+printf '+++\ndate = "2026-09-06T12:00:00Z"\nblyg_kind = "thread"\n+++\nQuoting a thread.\n\n![[%s]]\n' \
+  "$thread" > "$outer_md"
+stamp
+build
+outer=$(sed -n 's/^blyg_id = "\(.*\)"$/\1/p' "$outer_md")
+thread_version=$(field $thread 'd["version"]')
+[ "$(field $outer 'd["transclusions"]')" = "[{'id': '$thread', 'version': $thread_version}]" ] \
+  || fail "the quoting thread doesn't name exactly the thread it quotes"
+field $outer 'd["content_html"]' \
+  | grep -q "data-blyg-id=\"$thread\" data-blyg-version=\"$thread_version\"><p>A thread that quotes" \
+  || fail "the quoting thread doesn't bake the quoted thread"
+[ "$(field $outer 'd["content_html"].count("data-blyg-id=\"'$fragment'\"")')" = 1 ] \
+  || fail "the quoted thread's own quote isn't nested in the bake"
+echo "ok: a thread quoting a thread bakes its quote nested"
+
+# 7. The quoted thread can't quote back (§10.2's closure check).
+printf '\n![[%s]]\n' "$outer" >> "$thread_md"
+if err=$(python3 "$repo/scripts/blyg_stamp.py" 2>&1 >/dev/null); then
+  fail "stamp let a thread quote a thread that quotes it"
+fi
+grep -q "MUST NOT quote one that quotes it" <<<"$err" || fail "refused, but not by the closure check: $err"
+echo "ok: a quote cycle is refused"

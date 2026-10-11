@@ -545,6 +545,40 @@ class TransclusionSurfaceTests(SurfaceTests):
     def test_valid_thread_passes(self):
         self.assertEqual(self.problems(), [])
 
+    OUTER = "3tvmngj59053w661mhapmy60mb"
+
+    def quote_the_thread(self, inner_html=None):
+        """OUTER, a thread baking thread ID v1 -- and so FRAG, nested."""
+        inner = self.docs[ID]["content_html"] if inner_html is None else inner_html
+        body = f"Outer.\n\n![[{ID}]]\n"
+        self.docs[self.OUTER] = item_doc(self.OUTER, body=body,
+                                         html=f"<p>Outer.</p>\n{bv.wrapper(ID, 1, inner)}")
+        self.docs[self.OUTER]["transclusions"] = [{"id": ID, "version": 1}]
+        self.ledger[self.OUTER] = {
+            "path": "content/blyg/o.md", "created": "2026-01-01T00:00:00Z", "version": 1,
+            "kind": "thread", "withdrawn": False, "last_hash": bs.content_hash(body),
+            "changelog": [{"version": 1, "at": "2026-01-01T00:00:00Z", "note": None,
+                           "kind": "thread"}],
+            "transclusions": [{"id": ID, "version": 1, "line": 3, "kind": "thread",
+                               "content_hash": self.ledger[ID]["last_hash"],
+                               "content_md": f"Intro.\n\n![[{FRAG}]]\n",
+                               "transclusions": self.ledger[ID]["transclusions"]}]}
+
+    def test_a_thread_may_quote_a_thread(self):
+        # §10.2: nesting is nested blockquotes; only the direct quote is
+        # OUTER's provenance (§10.3).
+        self.quote_the_thread()
+        self.assertEqual(self.problems(), [])
+
+    def test_a_quoted_thread_must_be_baked_with_its_own_quotes(self):
+        self.quote_the_thread(inner_html="<p>Intro.</p>\n")
+        self.assertTrue(any("byte-identical" in p for p in self.problems()))
+
+    def test_a_quote_cycle_fails(self):
+        self.quote_the_thread()
+        self.docs[ID]["transclusions"].append({"id": self.OUTER, "version": 1})
+        self.assertTrue(any("quotes itself" in p for p in self.problems()))
+
     def test_provenance_must_match_the_ledger(self):
         self.docs[ID]["transclusions"] = [{"id": FRAG, "version": 2}]
         self.assertTrue(any("baked" in p for p in self.problems()))
@@ -588,9 +622,9 @@ class TransclusionSurfaceTests(SurfaceTests):
         self.assertTrue(any(f"{FRAG} v2, a version {FRAG} has never published" in p
                             for p in self.problems()))
 
-    def test_provenance_naming_a_non_fragment_version_fails(self):
-        self.ledger[FRAG]["changelog"][0]["kind"] = "thread"
-        self.assertTrue(any("not a fragment" in p for p in self.problems()))
+    def test_provenance_naming_an_endcap_fails(self):
+        self.ledger[FRAG]["changelog"][0]["kind"] = "withdrawn"
+        self.assertTrue(any("no content to quote" in p for p in self.problems()))
 
     def test_withdrawn_thread_carries_empty_transclusions(self):
         self.ledger[ID].update(version=2, withdrawn=True, last_hash=bs.EMPTY_CONTENT_HASH)

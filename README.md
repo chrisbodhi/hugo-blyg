@@ -422,8 +422,8 @@ immutable, and §5.4 requires that of a media URL.
 
 ## Transclusion
 
-A thread quotes one of the site's own fragments with a line consisting
-solely of its id in a directive (§10.1):
+A thread quotes one of the site's own items, a fragment or another
+thread, with a line consisting solely of its id in a directive (§10.1):
 
 ```md
 Something worth quoting:
@@ -435,20 +435,21 @@ The same text inline, or inside a fenced code block, is inert. The
 whitespace around a directive must be spaces and tabs: anything else
 (a non-breaking space, say) is refused at stamp time, since Markdown
 wouldn't read the line as a block of its own. Only
-threads transclude, only this site's own fragments can be transcluded
-(0.3 allows threads and other origins' items too, which this module
-doesn't build), and the reserved `![[id@vN]]` form is refused, as is a
-partial transclusion (see "Content contract").
+threads transclude, only this site's own items can be transcluded
+(0.3 allows other origins' items too, which this module doesn't build),
+and the reserved `![[id@vN]]` form is refused, as is a partial
+transclusion (see "Content contract").
 
 **Resolution happens in `blyg_stamp.py`, at publish time, never in the
 build.** Hugo rebuilds everything on every deploy, so a template that
-resolved `![[id]]` against the fragment's current page would silently
-rewrite every thread quoting it whenever the fragment changed — a
+resolved `![[id]]` against the source's current page would silently
+rewrite every thread quoting it whenever the source changed — a
 same-version stealth edit (§13.3), and exactly the cascade §10.4 forbids.
 Instead, whenever the stamp script creates a thread version, it resolves
 each directive to the target's latest published version (after this same
-run, so editing a fragment and the thread quoting it together bakes the
-new version) and stores the snapshot in the thread's ledger entry:
+run, so editing a source and the thread quoting it together bakes the
+new version: fragments are planned first, then each thread after the
+threads it quotes) and stores the snapshot in the thread's ledger entry:
 
 ```json
 "transclusions": [
@@ -457,28 +458,38 @@ new version) and stores the snapshot in the thread's ledger entry:
 ]
 ```
 
-A directive that doesn't resolve to a currently-published fragment
-(unknown id, draft, withdrawn, a thread) is a publish error. An
+A quoted thread's snapshot also carries `"kind": "thread"` and the
+snapshots of the version it quotes, nested, since its `content_html`
+bakes them: nesting is nested blockquotes (§10.2). Only the direct quote
+is the quoting thread's provenance (§10.3).
+
+A directive that doesn't resolve to a currently-published item (unknown
+id, draft, withdrawn) is a publish error, and so is one that breaks
+§10.2's closure check: a thread can't quote itself, or a thread that
+quotes it at any depth. An
 unchanged thread is never re-resolved: later edits, withdrawal or
-pinning of the fragment leave it alone until the thread itself is
+pinning of the source leave it alone until the thread itself is
 republished, which re-resolves every directive to the then-latest
 versions. A withdrawn thread's snapshots are dropped (§9), and
 `--amend` reverting a thread restores exactly the snapshots that shipped.
 The one exception to "never re-resolved": if `--amend` undoes or rewrites
-an unshipped fragment version that a thread baked, the thread's own
+an unshipped source version that a thread baked, the thread's own
 unshipped version is amended in the same run to re-resolve, since its
 provenance would otherwise name a version that no longer exists, or
 exists with other content (§10.3). `blyg_validate.py` backs that up by
-checking every baked `{id, version}` against the fragment's changelog.
+checking every baked `{id, version}` against the source's changelog.
+That covers a thread quoting a thread quoting a fragment, too: the
+fragment's revert re-resolves the inner thread, and that the outer one.
 
-`item.html` bakes each snapshot where its directive line was, as
+`bake.html` bakes each snapshot where its directive line was, as
 `<blockquote class="blyg-transclusion" data-blyg-id="…"
 data-blyg-version="…">…</blockquote>` with no link inside, rendering the
-stored `content_md` in the **fragment's own page context**. That is the
-same rendering that produced the fragment's `content_html` (verified
+stored `content_md` in the **source's own page context** (and, for a
+quoted thread, baking its nested snapshots the same way). That is the
+same rendering that produced the source's `content_html` (verified
 byte-identical against Hugo 0.151.0, shortcodes and footnotes included),
 and `blyg_validate.py` checks it byte for byte wherever that version's
-HTML is still on the wire: the fragment's live document while it sits at
+HTML is still on the wire: the source's live document while it sits at
 the baked version, or a pin. The item document's `transclusions` is the
 `{id, version}` provenance, in directive order.
 
@@ -745,7 +756,7 @@ included. To write one literally, use Hugo's escaped form,
 ## Not yet built
 
 0.3's grammar for partial transclusions and `[[id]]` links (refused for
-now, see "Content contract"), quoting threads, and its Level 2
+now, see "Content contract") and its Level 2
 cross-client constructs: stubs, lineage (`forked_from`), `cited`, and
 Webmention. All of them are optional to emit. (The `page` field is built:
 see "HTML pages".)
@@ -770,7 +781,9 @@ builds what's in front of you. CI runs all of these, and also checks that
 an unstamped body edit fails `hugo`. `transclusion_e2e.sh` edits and then
 withdraws the fragment that `exampleSite`'s transcluding thread quotes,
 rebuilding each time, and fails unless the thread's built `content_html`
-stays byte-identical until the thread is itself re-stamped.
+stays byte-identical until the thread is itself re-stamped; then it adds
+a thread quoting that thread, and checks the nested bake and the closure
+check.
 `pages_e2e.sh` edits, re-kinds and withdraws `exampleSite`'s first
 fragment, whose v1 is pinned, and fails unless the pinned page's content stays the
 pin's `content_html` throughout, the live page moves with the kind, and

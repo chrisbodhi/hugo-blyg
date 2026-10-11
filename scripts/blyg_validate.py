@@ -64,7 +64,9 @@ class _HTMLCollector(html.parser.HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.refs: list[tuple[str, str, str]] = []  # (tag, attr, url)
-        # (data-blyg-id, data-blyg-version) of every §10.2 wrapper, in order
+        # (data-blyg-id, data-blyg-version) of every top-level §10.2
+        # wrapper, in order -- not those nested in a quoted thread's bake,
+        # which are that thread's provenance, not this version's (§10.2)
         self.transclusions: list[tuple[str | None, str | None]] = []
         # blyg-tk-gen wrappers (§5.7) outside any transclusion: this
         # version's own generated spans, not ones quoted with a fragment
@@ -80,8 +82,9 @@ class _HTMLCollector(html.parser.HTMLParser):
         if tag == "blockquote":
             a = dict(attrs)
             quoted = "blyg-transclusion" in classes
+            nested = any(self._blockquotes)
             self._blockquotes.append(quoted)
-            if quoted:
+            if quoted and not nested:
                 self.transclusions.append((a.get("data-blyg-id"), a.get("data-blyg-version")))
         if tag in ("span", "div") and "blyg-tk-gen" in classes and not any(self._blockquotes):
             self.generated += 1
@@ -403,25 +406,29 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
     return doc
 
 
-def wrapper(blyg_id: str, version: int, fragment_html: str) -> str:
+def wrapper(blyg_id: str, version: int, source_html: str) -> str:
     return (f'<blockquote class="blyg-transclusion" data-blyg-id="{blyg_id}" '
-            f'data-blyg-version="{version}">{fragment_html}</blockquote>')
+            f'data-blyg-version="{version}">{source_html}</blockquote>')
 
 
 def check_snapshots(public_blyg: Path, ledger: dict, docs: dict, problems: Problems) -> None:
     """§10.3: provenance names "the exact versions baked", so each one must
-    be a version its source actually published as a fragment -- the
-    ledger's changelog records every version's kind. (An --amend that
-    undid or rewrote an unshipped source version is what could break
-    that; blyg_stamp.py re-resolves such threads, and this is the check
-    behind it.)
+    be a version its source actually published with content -- the
+    ledger's changelog records every version's kind, and an endcap has
+    none to quote. (An --amend that undid or rewrote an unshipped source
+    version is what could break that; blyg_stamp.py re-resolves such
+    threads, and this is the check behind it.)
 
-    §10.2: a baked snapshot is the fragment's rendered HTML at the baked
-    version. The template renders it from the ledger's stored content_md
-    rather than copying bytes, so wherever that version's content_html is
-    still on the wire -- the fragment's live document, or a pin -- the
-    baked copy must match it exactly. (A later fragment version leaves
-    nothing to compare against; that's §10.4 working, not a problem.)"""
+    §10.2: a baked snapshot is the source's rendered HTML at the baked
+    version -- a thread's with its own quotes baked inside, nested. The
+    template renders it from the ledger's stored content_md rather than
+    copying bytes, so wherever that version's content_html is still on
+    the wire -- the source's live document, or a pin -- the baked copy
+    must match it exactly. (A later source version leaves nothing to
+    compare against; that's §10.4 working, not a problem.)
+
+    And §10.2's closure check, as it stands on the wire: no thread
+    quotes itself, directly or through other local threads."""
     for thread_id, doc in sorted(docs.items()):
         if doc.get("kind") != "thread":
             continue
@@ -434,14 +441,15 @@ def check_snapshots(public_blyg: Path, ledger: dict, docs: dict, problems: Probl
                              f"transcludes {fid} v{version}, a version {fid} has never "
                              f"published (§10.3)")
                 continue
-            if published[version] != "fragment":
+            if published[version] not in ("fragment", "thread"):
                 problems.add(f"items/{thread_id}.json",
                              f"transcludes {fid} v{version}, which was published as "
-                             f"{published[version]!r}, not a fragment (§10.2)")
+                             f"{published[version]!r}, with no content to quote (§10.2)")
                 continue
             source = docs.get(fid)
             reference = None
-            if source and source.get("kind") == "fragment" and source.get("version") == version:
+            if source and source.get("kind") == published[version] \
+                    and source.get("version") == version:
                 reference = source.get("content_html")
             else:
                 pin = public_blyg / "items" / str(fid) / f"v{version}.json"
@@ -454,6 +462,19 @@ def check_snapshots(public_blyg: Path, ledger: dict, docs: dict, problems: Probl
                 problems.add(f"items/{thread_id}.json",
                              f"the baked snapshot of {fid} v{version} isn't byte-identical to "
                              f"that version's own content_html (§10.2)")
+
+    quotes = {i: [t.get("id") for t in d.get("transclusions") or []] for i, d in docs.items()}
+    for thread_id in sorted(quotes):
+        seen, todo = set(), list(quotes[thread_id])
+        while todo:
+            i = todo.pop()
+            if i not in seen:
+                seen.add(i)
+                todo.extend(quotes.get(i, []))
+        if thread_id in seen:
+            problems.add(f"items/{thread_id}.json",
+                         "quotes itself, directly or through other threads -- a thread "
+                         "MUST NOT transclude one that transcludes it (§10.2)")
 
 
 def check_index(public_blyg: Path, ledger: dict, docs: dict, problems: Problems) -> None:
