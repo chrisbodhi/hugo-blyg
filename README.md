@@ -46,7 +46,7 @@ supplies five things.
 <your-site-module-path>` first. Then:
 
 ```sh
-hugo mod get github.com/chrisbodhi/hugo-blyg@v0.3.0
+hugo mod get github.com/chrisbodhi/hugo-blyg@v0.3.1
 ```
 
 **2. Config**, in `hugo.toml` (or `config.toml`):
@@ -359,7 +359,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: chrisbodhi/hugo-blyg/publish-from-issue@v0.3.0
+      - uses: chrisbodhi/hugo-blyg/publish-from-issue@v0.3.1
         with:
           authors: someone, someone-else   # optional; the owner is always allowed
           label: blyg                      # optional
