@@ -88,7 +88,7 @@
 {{- $manifest := dict
   "blyg" "0.3"
   "level" $level
-  "generator" "hugo-blyg/0.3.1"
+  "generator" "hugo-blyg/0.3.2"
   "generator_url" "https://github.com/chrisbodhi/hugo-blyg"
   "site" (printf "%sblyg/" $base)
   "title" site.Title
