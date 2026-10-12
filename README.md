@@ -603,15 +603,13 @@ followed by a metadata block:
   there is no version list. An item with one version and no pins has
   nothing to cite, and no version line;
 - the live version's changelog **note**, in quotes, when it has one;
-- **Created**, and, once there's a v2, **Most recent** with its version;
+- **Created**, and, once there's a v2, **Most recent** with its version,
+  led by an italic *thread* tag on a thread;
 - **Permalink**.
 
-On the feed page an `<hr>` separates each item from the next, and a
-fragment shows in full. A thread is cut short to a
-card: an italic *thread* label, then its own text as plain text up to its
-first transclusion (the quote is someone else's words, and flattened
-into an excerpt it would read as the thread's), capped at 300
-characters, then "read the thread →". A withdrawn item's page stays up,
+On the feed page an `<hr>` separates each item from the next, and every
+item shows in full, a thread's quotes included; a thread's timestamps
+start with an italic *thread* tag. A withdrawn item's page stays up,
 says it was withdrawn, and still cites its pins. The permalink follows
 the item's authored kind, so an item whose kind changes moves between
 `f/` and `t/`, and the old address becomes an alias that redirects to it.
@@ -670,14 +668,13 @@ written against that contract styles these pages as well:
 |---|---|
 | `div.blyg` | the whole of each blyg page's content, inside the site's `main` |
 | `article.fragment`, `article.thread` | one item, by kind (a pinned page's by the kind that version had) |
-| `article.fragment.thread-card` | a thread's card on the feed page (the reference client's class for it) |
 | `article.fragment.withdrawn` | a withdrawn item's endcap; bare `.withdrawn` for "Nothing published yet." |
 | `div.item-content` | the item's published `content_html`, untouched: everything outside it is apparatus |
 | `p.version-line`, `span.vlabel`, `span.pins` | the version line, its version, its pin citations |
 | `p.version-note` | a version's note |
 | `p.timestamps` | Created / Most recent, or a pinned page's Published |
 | `a.permalink` | the Permalink link |
-| `.kind-chip` | the italic *thread* label on a thread's card |
+| `.kind-chip` | the italic *thread* tag on a live thread's timestamps |
 | `.pinned-banner` | a pinned page's frozen-snapshot banner |
 | `.vnav`, `.vstep`, `.vlatest`, `.vextra`, `article.showing-pin` | added by the version stepper, so they exist only with JavaScript on; never depend on them |
 | `blockquote.blyg-transclusion`, `.blyg-tk-gen` | wire tokens inside `content_html` (§10.2, §5.7): style them freely, but a transclusion has to keep reading as quoted material |
@@ -696,8 +693,7 @@ replace one without taking over the rest:
 | Partial | Renders |
 |---|---|
 | `view/feed.html` | the feed page: its heading, the entries with an `<hr>` between them, the stepper |
-| `view/entry.html` | one item on the feed page: a fragment, or a thread's card |
-| `view/excerpt.html` | a thread card's text (returns plain text) |
+| `view/entry.html` | one item on the feed page |
 | `view/item.html` | an item's live page, or its withdrawal endcap |
 | `view/pin.html` | a pinned version's page |
 | `view/meta.html` | an item's metadata block, from the four below |
@@ -721,8 +717,8 @@ To turn the item pages off, set `pages = false` under `[params.blyg]`
 (and drop `"html"` from the section's `outputs` if the feed page should
 go too). Only do that on a site that has never served them with a pin:
 a pinned page, once served, MUST keep returning 200 (§8.4 rule 1). With
-pages off, the feed page shows threads in full, cites pins by their
-JSON files, and runs no stepper; item documents drop their `"page"`
+pages off, the feed page cites pins by their JSON files and runs no
+stepper; item documents drop their `"page"`
 (§5.8), which otherwise names each item's permalink, origin-relative,
 and feed entries their `<link>`.
 
