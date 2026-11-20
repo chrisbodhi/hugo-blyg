@@ -331,7 +331,7 @@ python3 "$BLYG/scripts/blyg_stamp.py"
 In a site's CI, all three gates:
 
 ```yaml
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Locate hugo-blyg
@@ -388,7 +388,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: chrisbodhi/hugo-blyg/publish-from-issue@v0.4.0
         with:
           authors: someone, someone-else   # optional; the owner is always allowed
