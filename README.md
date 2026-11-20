@@ -331,7 +331,7 @@ python3 "$BLYG/scripts/blyg_stamp.py"
 In a site's CI, all three gates:
 
 ```yaml
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Locate hugo-blyg

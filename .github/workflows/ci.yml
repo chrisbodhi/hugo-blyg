@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python3 -m unittest discover -s tests
@@ -25,7 +25,7 @@ jobs:
         working-directory: exampleSite
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - uses: peaceiris/actions-hugo@v3
@@ -61,7 +61,7 @@ jobs:
       # The version stepper in headless Chromium: it steps an item through
       # its pins in place, fetching nothing else (§8.4), and with
       # JavaScript off every pin is still a plain link.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - name: Install Playwright
