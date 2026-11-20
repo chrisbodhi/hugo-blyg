@@ -11,7 +11,7 @@ jobs:
     name: Script tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -24,7 +24,7 @@ jobs:
       run:
         working-directory: exampleSite
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
