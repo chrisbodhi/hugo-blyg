@@ -74,7 +74,7 @@ def item_doc(blyg_id, *, kind="thread", version=1, withdrawn=False, body="Body.\
                               for v in range(1, version + 1)]
     md, h = ("", "") if withdrawn else (body, html)
     doc = {
-        "blyg": "0.3", "id": blyg_id, "kind": "withdrawn" if withdrawn else kind,
+        "blyg": "0.4", "id": blyg_id, "kind": "withdrawn" if withdrawn else kind,
         "origin": ORIGIN, "created": changelog[0]["at"], "updated": changelog[-1]["at"],
         "version": version, "content_md": md, "content_html": h,
         "content_hash": bs.content_hash(md), "media": [], "changelog": changelog,
@@ -125,7 +125,7 @@ class SurfaceTests(unittest.TestCase):
         self.ledger_path.write_text(json.dumps(self.ledger), encoding="utf-8")
         updated = max(d["updated"] for d in self.docs.values())
         (self.blyg / "blyg.json").write_text(json.dumps({
-            "blyg": "0.3", "level": 1, "generator": "t", "site": ORIGIN, "title": "t",
+            "blyg": "0.4", "level": 1, "generator": "t", "site": ORIGIN, "title": "t",
             "feed": "feed.xml", "items": "items/index.json", "updated": updated,
             **self.manifest_extra}), encoding="utf-8")
         rows = sorted(({k: d[k] for k in ("id", "kind", "created", "updated", "version")}
@@ -235,17 +235,58 @@ class SurfaceTests(unittest.TestCase):
         self.feed_items = [self.feed_item(ID, 1, self.docs[ID], title="")]
         self.assertTrue(any("MUST carry a <title>" in p for p in self.problems()))
 
-    def link_to_self(self, html):
+    def link_to_self(self, html, body=None, links=None):
         if type(self) is not SurfaceTests:
             self.skipTest("replaces the item with a self-link; the base surface's alone")
-        body = f"See [[{ID}]].\n"
+        body = body or f"See [[{ID}]].\n"
         self.docs[ID] = item_doc(ID, body=body, html=html)
+        self.docs[ID]["links"] = [{"id": i} for i, _ in bs.link_occurrences(body)] \
+            if links is None else links
+        if not self.docs[ID]["links"]:
+            del self.docs[ID]["links"]
         self.ledger[ID]["last_hash"] = bs.content_hash(body)
 
+    DOC = f"{ORIGIN}items/{ID}.json"
+
     def test_a_resolved_link_renders_as_an_anchor(self):
-        self.link_to_self(f'<p>See <a href="{ORIGIN}t/{ID}/">Body.</a>.</p>')
+        # No pages built here, so the href is the item document (0.4 §10.1).
+        self.link_to_self(f'<p>See <a href="{self.DOC}">Body.</a>.</p>')
         self.ledger[ID]["links"] = [{"id": ID, "page": f"t/{ID}/", "text": "Body."}]
         self.assertEqual(self.problems(), [])
+
+    def test_with_no_pages_a_link_never_names_the_permalink_convention(self):
+        self.link_to_self(f'<p>See <a href="{ORIGIN}t/{ID}/">Body.</a>.</p>')
+        self.ledger[ID]["links"] = [{"id": ID, "page": f"t/{ID}/", "text": "Body."}]
+        self.assertTrue(any("names the item document" in p for p in self.problems()))
+
+    def test_links_is_one_entry_per_link(self):
+        body = f"See [[{ID}]] and [[{ID} | again]].\n"
+        html = f'<p>See <a href="{self.DOC}">Body.</a> and <a href="{self.DOC}">again</a>.</p>'
+        self.ledger[ID]["links"] = [{"id": ID, "page": f"t/{ID}/", "text": "Body."}]
+        self.link_to_self(html, body)
+        self.assertEqual(self.problems(), [])
+        self.link_to_self(html, body, links=[{"id": ID}])
+        self.assertTrue(any("one {id} per link" in p for p in self.problems()))
+
+    def test_links_is_omitted_rather_than_empty(self):
+        self.link_to_self(f'<p>See <a href="{self.DOC}">Body.</a>.</p>')
+        self.ledger[ID]["links"] = [{"id": ID, "page": f"t/{ID}/", "text": "Body."}]
+        del self.docs[ID]["links"]
+        self.assertTrue(any("(§10.3a)" in p for p in self.problems()))
+
+    def test_a_label_is_the_anchor_text(self):
+        body = f"See [[{ID} | the label]].\n"
+        self.ledger[ID]["links"] = [{"id": ID, "page": f"t/{ID}/", "text": "Body."}]
+        self.link_to_self(f'<p>See <a href="{self.DOC}">Body.</a>.</p>', body)
+        self.assertTrue(any("with its label" in p for p in self.problems()))
+        self.link_to_self(f'<p>See <a href="{self.DOC}">the label</a>.</p>', body)
+        self.assertEqual(self.problems(), [])
+
+    def test_c0_controls_in_content_md_fail(self):
+        body = "A bell \x07.\n"
+        self.docs[ID] = item_doc(ID, body=body)
+        self.ledger[ID]["last_hash"] = bs.content_hash(body)
+        self.assertTrue(any("U+0007" in p for p in self.problems()))
 
     def test_an_unresolved_link_fails(self):
         # The stamp refuses it first; this is the backstop on the wire.
@@ -346,7 +387,7 @@ class GeneratedTests(SurfaceTests):
 
     def test_generated_needs_one_wrapper_per_span(self):
         self.generated(html="<p>A generated bit.</p>")
-        self.assertTrue(any("one entry per span" in p for p in self.problems()))
+        self.assertTrue(any("each span is wrapped" in p for p in self.problems()))
 
     def test_generated_carries_no_authoring_state(self):
         self.generated(wire=[{"sources": [], "model": "m", "prompt": "write it"}])
@@ -578,6 +619,36 @@ class TransclusionSurfaceTests(SurfaceTests):
                            "kind": "fragment"}]}
 
     def test_valid_thread_passes(self):
+        self.assertEqual(self.problems(), [])
+
+    def label(self, label, baked_label):
+        body = f"Intro.\n\n![[{FRAG} | {label}]]\n"
+        baked = bv.wrapper(FRAG, 1, self.FRAG_HTML, baked_label)
+        self.docs[ID].update(content_md=body, content_hash=bs.content_hash(body),
+                             content_html=f"<p>Intro.</p>\n{baked}")
+        self.ledger[ID]["last_hash"] = bs.content_hash(body)
+
+    def test_a_labelled_directive_bakes_data_blyg_label(self):
+        # 0.4 §10.2 (#81): verbatim, HTML-escaped as Hugo's htmlEscape does.
+        self.label('Tom & "Jerry"', 'Tom & "Jerry"')
+        self.assertIn('data-blyg-label="Tom &amp; &#34;Jerry&#34;"', self.docs[ID]["content_html"])
+        self.assertEqual(self.problems(), [])
+
+    def test_a_label_left_unbaked_fails(self):
+        self.label("mine", None)
+        self.assertTrue(any("data-blyg-label" in p for p in self.problems()))
+
+    def test_a_quote_is_never_inside_a_generated_wrapper(self):
+        g = {"sources": [], "model": "m"}
+        self.ledger[ID]["generated"] = [dict(g, authored={"model": "m"})]
+        self.docs[ID]["generated"] = [g]
+        baked = bv.wrapper(FRAG, 1, self.FRAG_HTML)
+        inside = f'<div class="blyg-tk-gen"><p>Intro.</p>\n{baked}</div>'
+        self.docs[ID]["content_html"] = inside
+        self.assertTrue(any("MUST be closed before the blockquote" in p for p in self.problems()))
+        # Divided around it, one span is two wrappers and one entry (§5.7).
+        self.docs[ID]["content_html"] = (f'<div class="blyg-tk-gen"><p>Intro.</p>\n</div>{baked}'
+                                         f'<div class="blyg-tk-gen"><p>More.</p></div>')
         self.assertEqual(self.problems(), [])
 
     OUTER = "3tvmngj59053w661mhapmy60mb"

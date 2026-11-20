@@ -97,6 +97,40 @@
     "version": 1,
     "withdrawn": false
   },
+  "6t845tq5762xfj7s9jt1y3ntq3": {
+    "changelog": [
+      {
+        "at": "2026-09-06T12:00:00Z",
+        "kind": "thread",
+        "note": null,
+        "version": 1
+      }
+    ],
+    "created": "2026-09-06T12:00:00Z",
+    "kind": "thread",
+    "last_hash": "sha256:27b3f856929dfa392884f48b5484f5ba6182a5e81124dbf252e20888ec730ce3",
+    "links": [
+      {
+        "id": "5cx94j6wbmzrdnnjxvs9j1nkba",
+        "page": "f/5cx94j6wbmzrdnnjxvs9j1nkba/",
+        "text": "A fragment with a root-relative link and an image from the"
+      }
+    ],
+    "path": "content/blyg/2026-09-06-labelled-thread.md",
+    "transclusions": [
+      {
+        "content_hash": "sha256:f1a909bc67bee5e235ab25105c6c18557733859e10276bab40c4ad263b2f76ec",
+        "content_md": "A thread. It carries an empty `transclusions` array until transclusion\nis built.\n",
+        "id": "5af83k331px73wdq6ydqq5bnqr",
+        "kind": "thread",
+        "line": 7,
+        "transclusions": [],
+        "version": 1
+      }
+    ],
+    "version": 1,
+    "withdrawn": false
+  },
   "75znj6f4rhcm9skpr2009yeqtz": {
     "changelog": [
       {

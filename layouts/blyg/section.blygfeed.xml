@@ -28,10 +28,15 @@
       even with zero actions involved (empirically confirmed against
       Hugo 0.151.0 -- see docs/conformance.md), but wrapping it in
       an action whose output is marked safe sidesteps that entirely.
-    - content_html is escaped with `transform.XMLEscape` (not CDATA --
-      so behavior doesn't change under --minify, and a literal "]]>"
-      inside a post can never break the feed) and then `safeHTML`, so
-      the autoescaper doesn't escape it a second time.
+    - content_html goes in a CDATA section, marked `safeHTML` so the
+      autoescaper leaves it alone, with any literal "]]>" in it split
+      across two sections ("]]" ends one, ">" opens the next), so a post
+      can never break the feed. Not an escaped text node: `hugo --minify`
+      collapses whitespace runs in XML text, which strips the
+      indentation out of every <pre> in a description (verified against
+      Hugo 0.151.0), while a CDATA section's text survives verbatim --
+      the minifier may respell it as escaped text, but keeps every
+      character. Either way a parser reads exactly content_html.
     - Every other interpolated value (titles, ids, the site's own
       base URL) is left to html/template's ordinary contextual
       autoescaping -- correct by default now that the document isn't
@@ -43,6 +48,9 @@
 {{- /* Each entry links its item's live HTML page (§7's example), when this
        module writes those (partials/blyg/pages-enabled.html). */ -}}
 {{- $pages := partial "blyg/pages-enabled.html" . -}}
+{{- /* <blyg:level> is the level the manifest claims (§6.1, §7). */ -}}
+{{- $level := 1 -}}
+{{- with site.Params.blyg -}}{{- with .level -}}{{- $level = . -}}{{- end -}}{{- end -}}
 
 {{- $events := slice -}}
 {{- range .Pages -}}
@@ -62,7 +70,7 @@
         {{- $last := index $entry.changelog (sub (len $entry.changelog) 1) -}}
         {{- $events = $events | append (dict
             "id" $id "version" $last.version "at" $last.at
-            "sort" (printf "%s|%010d" $last.at (int $last.version))
+            "sort" (printf "%s|0|%010d" $last.at (int $last.version))
             "kind" "withdrawn" "title" "withdrawn" "description" ""
             "created" $doc.created
             "link" (partial "blyg/permalink.html" (dict "id" $id "kind" $entry.kind "base" $base))
@@ -76,7 +84,7 @@
           {{- $kind := .kind | default $doc.kind -}}
           {{- $events = $events | append (dict
               "id" $id "version" .version "at" .at
-              "sort" (printf "%s|%010d" .at (int .version))
+              "sort" (printf "%s|%d|%010d" .at (cond (eq $kind "thread") 1 0) (int .version))
               "kind" $kind "title" ($title | default $kind)
               "description" $doc.content_html
               "created" $doc.created
@@ -88,7 +96,11 @@
   {{- end -}}
 {{- end -}}
 
-{{- /* Newest first; a version number breaks same-second ties. */ -}}
+{{- /* Newest first. A stamp run that publishes several items stamps them
+       all with one time, so among same-second events a thread is newer
+       than the fragments it may quote -- §7: a multi-item authoring act
+       SHOULD publish the thread last, so that it's the newest entry --
+       and then a version number breaks the tie. */ -}}
 {{- $events = sort $events "sort" "desc" -}}
 {{- $events = first 50 $events -}}
 {{ printf "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" | safeHTML }}
@@ -103,7 +115,7 @@
     {{- with $events }}
     <lastBuildDate>{{ (time.AsTime (index . 0).at).UTC.Format "Mon, 02 Jan 2006 15:04:05 GMT" }}</lastBuildDate>
     {{- end }}
-    <blyg:level>1</blyg:level>
+    <blyg:level>{{ $level }}</blyg:level>
     <blyg:manifest>{{ $manifestURL }}</blyg:manifest>
     {{- range $events }}
     <item>
@@ -112,7 +124,7 @@
       <link>{{ .link }}</link>
       {{- end }}
       <title>{{ .title }}</title>
-      <description>{{ .description | transform.XMLEscape | safeHTML }}</description>
+      <description>{{ printf "<![CDATA[%s]]>" (replace .description "]]>" "]]]]><![CDATA[>") | safeHTML }}</description>
       <pubDate>{{ (time.AsTime .at).UTC.Format "Mon, 02 Jan 2006 15:04:05 GMT" }}</pubDate>
       <blyg:id>{{ .id }}</blyg:id>
       <blyg:kind>{{ .kind }}</blyg:kind>

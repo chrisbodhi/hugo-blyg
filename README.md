@@ -1,7 +1,7 @@
 # hugo-blyg
 
 A Hugo Module that builds the static publish-side surfaces of the
-[Blygger protocol](https://blygger.org/spec/0.3/) v0.3, Level 1 or 2
+[Blygger protocol](https://blygger.org/spec/0.4/) v0.4, Level 1 or 2
 — `blyg.json` (manifest), `feed.xml`, `items/index.json` (archive index),
 `items/{id}.json` (canonical item documents), and, optionally,
 `blogroll.opml` (§11) — plus human-readable HTML pages for the feed,
@@ -115,7 +115,7 @@ own head, header, navigation and styles. Two optional touches in its
 {{ partial "blyg/head.html" . }}
 ```
 
-**CORS.** Protocol v0.3 §4 (SHOULD): public JSON/XML responses SHOULD
+**CORS.** Protocol v0.4 §4 (SHOULD): public JSON/XML responses SHOULD
 carry permissive CORS (`Access-Control-Allow-Origin: *`), since
 cross-origin reading by other clients depends on it. On Apache, this
 ships with the module as `static/blyg/.htaccess` — Hugo mounts an
@@ -166,8 +166,16 @@ document out of autoescaping:
 ```gotemplate
 {{ printf "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" | safeHTML }}
 ...
-<description>{{ .description | transform.XMLEscape | safeHTML }}</description>
+<description>{{ printf "<![CDATA[%s]]>" (replace .description "]]>" "]]]]><![CDATA[>") | safeHTML }}</description>
 ```
+
+The description is a CDATA section, not an escaped text node, because
+`hugo --minify` collapses whitespace runs in XML text: an escaped
+description loses the indentation of every `<pre>` in it (verified
+against Hugo 0.151.0), so the feed would no longer carry `content_html`
+(§7). The minifier may respell a CDATA section as escaped text, but it
+keeps every character. A literal `]]>` in a post is split across two
+sections, so it can't end one early.
 
 `section.blygfeed.xml` follows that idiom. The payoff: every other
 interpolated value (titles, ids, the site's own base URL) gets Hugo's
@@ -191,10 +199,13 @@ who's read Hugo's own RSS template will already expect to see.
   module only ever reads the ledger's `withdrawn` flag, it never writes
   it.
 - `blyg_kind = "fragment"` or `"thread"` (defaults to `"thread"` when
-  absent). The item document's `kind` comes from the **ledger**, and the
-  build fails if the page disagrees: a kind change changes the document,
-  so it is a publish event that needs a version bump (§5.2), which only
-  the stamp script can record. Threads always carry a `transclusions`
+  absent). **It is fixed at the item's first publication** (§5.3, 0.4):
+  the stamp script refuses a change, and the build fails if the page
+  disagrees with the ledger, whose kind the item document carries. (A
+  fragment is a leaf others quote; as a thread, its quoters' next bake
+  would carry words they never chose.) Withdrawal is the one change of
+  kind, and returning restores the kind it had. With `--amend`, an item
+  that has never shipped may still change. Threads always carry a `transclusions`
   array (see "Transclusion"); fragments omit the key entirely
   (§10.3). Any other value, including `"withdrawn"`, fails the build:
   `"withdrawn"` is a wire-level state this module derives from the
@@ -217,10 +228,24 @@ who's read Hugo's own RSS template will already expect to see.
   The withdrawal event of a currently-withdrawn item is titled
   `withdrawn`, literally, as §7 requires by name.
 - An inline `[[id]]` outside code is a plain internal link (§10.1): it
-  renders as a link to that item's page, resolved when the stamp script
-  runs, and an id it can't resolve is a publish error. Put it in
-  backticks or a code fence to keep it as text. See "Transclusion" for
-  quoting part of an item instead.
+  renders as a link to that item's page — or, with pages off, its item
+  document, never a guessed permalink — resolved when the stamp script
+  runs, and an id it can't resolve is a publish error. `[[id | text]]`
+  gives it a label (0.4), which is its anchor text, as plain text: no
+  Markdown or HTML in it is read, and a pipe in it doesn't split a table
+  cell. Without one the anchor text is the target's first line of prose.
+  Every link is disclosed in the item document's `links` array, one
+  `{id}` per link in document order (§10.3a); an ordinary Markdown link
+  to the same page is the silent citation and isn't. Put it in backticks
+  or any code block (fenced, or indented four columns) to keep it as
+  text. See "Transclusion" for quoting part of an item instead.
+- `content_md` is text (§5.1, 0.4): a C0 control character other than
+  tab, LF and CR is refused at stamp time, since one would make the whole
+  `feed.xml` unparseable, and the stamp warns on text that isn't in
+  Unicode NFC (published as written: the hash is over the bytes).
+- A relative URL you write resolves against the blyg's origin (§5.2,
+  0.4): `media/x.png` is `{origin}media/x.png`, `/about/` is the site's
+  `/about/`.
 - A changelog note describes a change; it never reproduces withheld
   content (§5.2). Where the previous version isn't pinned, a note MUST
   NOT quote its text — nothing can check that, so it's on the author.
@@ -230,13 +255,15 @@ who's read Hugo's own RSS template will already expect to see.
 `blyg.json`'s `"level"` field (§3) comes from the consuming site's own
 `[params.blyg].level`, defaulting to `1` when unset. This module
 accepts `1` or `2` and fails the build on anything else. Level 1 is the
-single-origin protocol, carried into 0.3 from 0.2. A publisher conforms
+single-origin protocol, carried into 0.4 from 0.2. A publisher conforms
 at Level 2 by following its rules for whatever L2 constructs it emits
 (§3): this module emits `page` (§5.8) and enforces the local closure
-check on nested quotes (§10.2), and never quotes another origin, stubs
-or forks, so `2` is an honest claim too, and Webmention is optional at
-every level (§15.7). The manifest's
-`"blyg": "0.3"` names the spec version, not the level (§3.1), and
+check on nested quotes (§10.2), and never quotes another origin, stubs,
+forks, draws on another origin in generation or relocates its surface
+(§6.1's `item`/`pin` templates), so `2` is an honest claim too, and
+Webmention is optional at every level (§15.7). `feed.xml`'s
+`<blyg:level>` says the same level. The manifest's
+`"blyg": "0.4"` names the spec version, not the level (§3.1), and
 `"generator_url"` points at this repository (§6.1). Note the blogroll is optional at *every* level and
 never changes the level, and generation provenance (§5.7) is L1 — it
 only applies to versions that involved generation.
@@ -327,7 +354,10 @@ GitHub's `ubuntu-latest` runners come with Go installed.
 an issue into a new item: the issue body becomes the item body
 (line endings normalized to LF before hashing). It's a fragment, unless
 the body has a `![[id]]` directive, which only a thread can carry (§10),
-so then it's a thread. The title only names
+so then it's a thread. Since 0.4 fixes an item's kind at its first
+publication (§5.3), that choice is permanent; §5.3 says a client that
+creates items on an author's behalf SHOULD create threads, so if your
+issues aren't all leaves, set `blyg_kind` in the PR before merging. The title only names
 the file (`content/blyg/YYYY-MM-DD-<slug>.md`) and the PR, since items
 have no title field (§5). It stamps the item, pushes `blyg/issue-N`, and
 opens a PR against the default branch that closes the issue on merge.
@@ -406,15 +436,16 @@ Hugo's regex engine (RE2) has none. The attribute list also covers
 candidate inside `srcset` and `url(...)` in inline styles. This catches
 shortcode-injected markup and ordinary markdown images/links in one pass, so no render hooks are
 needed. An in-document anchor (`#fn:1`, a footnote) is made absolute
-against the item's own page, `f/{id}/` or `t/{id}/` — the same URL with
-pages on or off, so `content_html` doesn't depend on that setting — and
-a fragment quoted into a thread keeps its anchors pointing at the
-fragment's page, exactly as in its own `content_html`. All of it lives
-in `partials/blyg/absolute-urls.html`. Page-relative URLs (`other/page`)
-can't be rewritten — they'd resolve against whichever page showed the
-item — so
-`scripts/blyg_validate.py` fails the build on them, and on anything
-else the rewrite can't make self-contained.
+against the item's own page, `f/{id}/` or `t/{id}/`, or with pages off
+against its item document (0.4: a guessed permalink is never baked into
+published bytes), and a fragment quoted into a thread keeps its anchors
+pointing at the fragment's, exactly as in its own `content_html`. Any
+other relative URL (`other/page`, `../x`, `?q`) resolves against the
+blyg's origin by RFC 3986 (§5.2, 0.4, decision #102), with Go's
+`url.ResolveReference`. All of it lives in
+`partials/blyg/absolute-urls.html`, and `scripts/blyg_validate.py`
+fails the build on anything the rewrite can't make self-contained (an
+empty URL, say).
 
 ## Media
 
@@ -436,13 +467,20 @@ Something worth quoting:
 ![[5cx94j6wbmzrdnnjxvs9j1nkba]]
 ```
 
-The same text inline, or inside a fenced code block, is inert. The
-whitespace around a directive must be spaces and tabs: anything else
-(a non-breaking space, say) is refused at stamp time, since Markdown
-wouldn't read the line as a block of its own. Only
-threads transclude, only this site's own items can be transcluded
-(0.3 allows other origins' items too, which this module doesn't build),
-and the reserved `![[id@vN]]` form is refused.
+The same text inline, or inside a code block — fenced, or indented four
+columns (a tab counts as four) where Markdown makes that a code block —
+is inert. The whitespace around a directive must be spaces and tabs:
+anything else (a non-breaking space, say) is refused at stamp time,
+since Markdown wouldn't read the line as a block of its own. A directive
+belongs to a thread: one in a fragment is a publish error (§10.1, 0.4).
+Only this site's own items can be transcluded (0.4 allows other
+origins' items too, which this module doesn't build), and the reserved
+`![[id@vN]]` form is refused on a line of its own; inline it's text.
+
+**Labels.** `![[id | the opening fragment]]` names the quoted item in
+the author's words (0.4): resolution ignores it, and the bake carries
+it, HTML-escaped, as `data-blyg-label` on the blockquote (§10.2), for any
+renderer's attribution line. It's never presented as the item's title.
 
 **Partial transclusion.** A blockquote directly under the directive, no
 blank line between, quotes just that text (§10.1):
@@ -461,8 +499,10 @@ exactly — soft line breaks don't matter, but the typographer's curly
 quotes do (`origin’s`, not `origin's`) — or the build fails (§10.2): the
 stamp script works from Markdown, so only the build can check. A blank
 line between the directive and the blockquote quotes the whole item,
-followed by your own blockquote, and a quote has to end with a blank
-line.
+followed by your own blockquote. The blockquote's extent is
+CommonMark's (0.4): an unquoted line straight after a quoted one is a
+lazy continuation, part of the selection, unless it's blank, starts a
+block of its own (a heading, a list item, a fence, …) or is a directive.
 
 **Resolution happens in `blyg_stamp.py`, at publish time, never in the
 build.** Hugo rebuilds everything on every deploy, so a template that
@@ -611,8 +651,9 @@ On the feed page an `<hr>` separates each item from the next, and every
 item shows in full, a thread's quotes included; a thread's timestamps
 start with an italic *thread* tag. A withdrawn item's page stays up,
 says it was withdrawn, and still cites its pins. The permalink follows
-the item's authored kind, so an item whose kind changes moves between
-`f/` and `t/`, and the old address becomes an alias that redirects to it.
+the item's authored kind, which 0.4 fixes at first publication (§5.3),
+so it never moves; an item whose kind changed before that keeps its old
+address as an alias that redirects to the live one.
 
 A pinned page is built from the pin file, never re-rendered: its
 content is that version's publish-time `content_html` (§8.4 rule 2),
@@ -761,11 +802,15 @@ A generated paragraph.
   changes the item document but not `content_md`, so the stamp script
   treats it as a new version, and the build fails if the body's markers
   disagree with the ledger.
-- Spans don't nest, can't be empty, and can't contain a transclusion
-  directive: quotation is transclusion's alone (§5.7 rule 3). A thread
-  quoting a fragment that has generated spans bakes them along with the
-  quote, but lists nothing in its own `generated`; that provenance is
-  the fragment version's.
+- Spans don't nest and can't be empty. A block span may carry a
+  transclusion directive on a line of its own, at its top level (0.4):
+  the quote bakes like any other, and the `blyg-tk-gen` wrapper is
+  closed before the blockquote and reopened after, so no quoted word is
+  marked as generated (§5.7, decision #102). The span is still one
+  `generated` entry, however many wrappers it takes. A source is never a
+  transclusion (§5.7 rule 3): a thread quoting a fragment that has
+  generated spans bakes them along with the quote, but lists nothing in
+  its own `generated`; that provenance is the fragment version's.
 - A withdrawal endcap carries no `generated`, and a pin carries its
   version's (§5.7 rules 4 and 5).
 
@@ -775,11 +820,14 @@ included. To write one literally, use Hugo's escaped form,
 
 ## Not yet built
 
-0.3's cross-origin constructs: quoting other origins' items, stubs,
-lineage (`forked_from`), `cited`, and Webmention — Level 2's business,
-all optional to emit. Everything 0.3 adds within one origin is built:
-nested and partial transclusion, `[[id]]` links, `page` and
-`generator_url`.
+The cross-origin constructs: quoting other origins' items, stubs,
+lineage (`forked_from`), `cited`, remote generation sources (0.4) and
+Webmention — Level 2's business, all optional to emit. Nor 0.4's
+manifest-located surface (`item`/`pin` templates; the default paths are
+what a static host serves) or hopper feeds, both optional. Everything
+0.4 adds within one origin is built: labels on links and directives,
+`links[]`, quotes inside generated output, CommonMark's extent for
+partial quotes and code blocks, and the text rules on `content_md`.
 
 ## Developing hugo-blyg
 
@@ -803,17 +851,32 @@ withdraws the fragment that `exampleSite`'s transcluding thread quotes,
 rebuilding each time, and fails unless the thread's built `content_html`
 stays byte-identical until the thread is itself re-stamped; then it adds
 a thread quoting that thread, and checks the nested bake and the closure
-check.
-`pages_e2e.sh` edits, re-kinds and withdraws `exampleSite`'s first
-fragment, whose v1 is pinned, and fails unless the pinned page's content stays the
-pin's `content_html` throughout, the live page moves with the kind, and
-deleting the pin file fails the build. `surfaces_e2e.sh` builds
-`exampleSite` with pages on and off, and fails unless every protocol
-surface comes out byte-identical, apart from the item documents'
-`"page"` and `feed.xml`'s entries' `<link>`s. `stepper_e2e.sh` serves a build and drives the version
+check, and then 0.4's grammar as built: labels, `links[]`, a lazy
+selection, indented code, a quote inside generated output, a relative
+URL, and links naming the item document with pages off.
+`pages_e2e.sh` edits and withdraws `exampleSite`'s first fragment, whose
+v1 is pinned, and fails unless the pinned page's content stays the pin's
+`content_html` throughout, a kind change is refused by the stamp and by
+the build, and deleting the pin file fails the build. `surfaces_e2e.sh`
+builds `exampleSite` with pages on and off, and fails unless every
+protocol surface comes out byte-identical, apart from the item
+documents' `"page"`, `feed.xml`'s entries' `<link>`s, and the hrefs in
+`content_html` that name an item's page with pages on and its item
+document with them off. `stepper_e2e.sh` serves a build and drives the version
 stepper in headless Chromium through `exampleSite`'s revised fragment
 (v1 and v2 pinned, v3 live), with JavaScript on and off; it needs Node
 and the `playwright` npm package.
+
+`tests/reader_suite.py` runs blygger-spec's reader suite
+(`conformance/reader/`, 101 `content_md` → `content_html` cases written
+from the 0.4 text) against the stamp script and a real build; its
+docstring says how. It isn't in CI, since it needs a checkout of the
+spec, whose fixtures move with the living text. Against the spec at
+`b841d62`, the 67 single-origin cases give 66 passes and one warning,
+on a case the fixtures mark ambiguous, `tk-output-own-line-directive`:
+it nests the quote inside the `blyg-tk-gen` wrapper, where the text
+since the fourteenth revision has the publisher close the wrapper
+around it. The other 34 cases need items imported from another origin.
 
 To try a change against a real site before tagging it, point that site's
 `go.mod` at a local checkout — the same `go list` recipe under "Scripts"

@@ -19,9 +19,10 @@
   site's own lists and feeds, and every blyg surface (§8.4 rule 4).
 
   The permalink follows the ledger's authored kind (which withdrawal
-  keeps), so a kind change moves it between f/ and t/; the old address
-  becomes an alias, which Hugo serves as a redirect. A pinned page lives
-  under the kind that version had.
+  keeps). 0.4 fixes the kind at first publication (§5.3), so it doesn't
+  move; an item whose kind changed before that keeps its old address as
+  an alias, which Hugo serves as a redirect. A pinned page lives under
+  the kind that version had.
 */ -}}
 {{- if partial "blyg/pages-enabled.html" . -}}
 {{- range $id, $entry := site.Data.blyg.ledger -}}

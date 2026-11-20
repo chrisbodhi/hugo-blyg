@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Validate a built blyg surface (public/blyg/) against the ledger and
-blygger-spec docs/protocol-v0.3.md (pinned at 80c8d65).
+blygger-spec docs/protocol-v0.4.md (pinned at 470f552).
 
 This is the build-side half of docs/conformance.md: everything
 scripts/blyg_stamp.py can't see because Hugo produces it -- the rendered
@@ -37,6 +37,7 @@ GUID_RE = re.compile(r"^blyg:(" + bs.BLYG_ID_RE_SRC + r"):v([1-9][0-9]*)$")
 PIN_RE = re.compile(r"^v([1-9][0-9]*)\.json$")
 ABSOLUTE_URL_RE = re.compile(r"^https?://[^\s/]+\S*$")
 FEED_WINDOW = 50
+PROTOCOL = "0.4"  # the "blyg" key of the manifest and live item documents (§3.1)
 
 # Attributes whose value is one URL, and the subset that embeds media.
 URL_ATTRS = {"href", "src", "poster", "cite", "action", "formaction", "data",
@@ -64,28 +65,42 @@ class _HTMLCollector(html.parser.HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.refs: list[tuple[str, str, str]] = []  # (tag, attr, url)
-        # (data-blyg-id, data-blyg-version, blyg-partial?) of every
-        # top-level §10.2 wrapper, in order -- not those nested in a quoted
-        # thread's bake, which are that thread's provenance, not this
-        # version's (§10.2)
-        self.transclusions: list[tuple[str | None, str | None, bool]] = []
+        # (data-blyg-id, data-blyg-version, blyg-partial?, data-blyg-label)
+        # of every top-level §10.2 wrapper, in order -- not those nested in
+        # a quoted thread's bake, which are that thread's provenance, not
+        # this version's (§10.2)
+        self.transclusions: list[tuple] = []
         # each top-level partial wrapper's <p> texts, in order (§10.2)
         self.partial_lines: list[list[str]] = []
         self._in_partial_p = False
         # blyg-tk-gen wrappers (§5.7) outside any transclusion: this
         # version's own generated spans, not ones quoted with a fragment
         self.generated = 0
+        # top-level transclusions baked inside one of those: never (§5.7)
+        self.quoted_in_gen = 0
         self._blockquotes: list[bool] = []  # open <blockquote>s: a transclusion?
+        self._gen_depth = 0  # open top-level blyg-tk-gen <div>/<span>s
+        self._gen_stack: list[bool] = []  # open div/spans: a top-level wrapper?
+        # (href, text) of every <a> outside a transclusion, in order
+        self.anchors: list[list] = []
+        self._anchor: list | None = None
 
     def handle_endtag(self, tag):
         if tag == "blockquote" and self._blockquotes:
             self._blockquotes.pop()
         if tag == "p":
             self._in_partial_p = False
+        if tag in ("div", "span") and self._gen_stack:
+            if self._gen_stack.pop():
+                self._gen_depth -= 1
+        if tag == "a":
+            self._anchor = None
 
     def handle_data(self, data):
         if self._in_partial_p:
             self.partial_lines[-1][-1] += data
+        if self._anchor is not None:
+            self._anchor[1] += data
 
     def handle_starttag(self, tag, attrs):
         classes = (dict(attrs).get("class") or "").split()
@@ -97,15 +112,24 @@ class _HTMLCollector(html.parser.HTMLParser):
             if quoted and not nested:
                 partial = "blyg-partial" in classes
                 self.transclusions.append((a.get("data-blyg-id"), a.get("data-blyg-version"),
-                                           partial))
+                                           partial, a.get("data-blyg-label")))
+                if self._gen_depth:
+                    self.quoted_in_gen += 1
                 if partial:
                     self.partial_lines.append([])
         if tag == "p" and len(self._blockquotes) == 1 and self._blockquotes[0] \
                 and self.transclusions and self.transclusions[-1][2]:
             self._in_partial_p = True
             self.partial_lines[-1].append("")
-        if tag in ("span", "div") and "blyg-tk-gen" in classes and not any(self._blockquotes):
-            self.generated += 1
+        if tag in ("span", "div"):
+            own = "blyg-tk-gen" in classes and not any(self._blockquotes)
+            self._gen_stack.append(own)
+            if own:
+                self.generated += 1
+                self._gen_depth += 1
+        if tag == "a" and not any(self._blockquotes):
+            self._anchor = [dict(attrs).get("href"), ""]
+            self.anchors.append(self._anchor)
         for name, value in attrs:
             if value is None:
                 continue
@@ -171,7 +195,7 @@ def check_manifest(public_blyg: Path, problems: Problems) -> dict | None:
     except (OSError, ValueError) as exc:
         problems.add("blyg.json", f"unreadable: {exc}")
         return None
-    expect = {"blyg": "0.3", "feed": "feed.xml", "items": "items/index.json"}
+    expect = {"blyg": PROTOCOL, "feed": "feed.xml", "items": "items/index.json"}
     for key, value in expect.items():
         if manifest.get(key) != value:
             problems.add("blyg.json", f"{key} is {manifest.get(key)!r}, expected {value!r}")
@@ -292,7 +316,7 @@ def check_generated(where: str, generated, ledger: dict, problems: Problems) -> 
 
 
 def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg: Path,
-               problems: Problems) -> dict | None:
+               problems: Problems, with_pages: bool = True) -> dict | None:
     where = f"items/{blyg_id}.json"
     path = public_blyg / "items" / f"{blyg_id}.json"
     if not path.is_file():
@@ -304,8 +328,8 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
         problems.add(where, f"not JSON: {exc}")
         return None
 
-    if doc.get("blyg") != "0.3":
-        problems.add(where, f"blyg is {doc.get('blyg')!r}, expected '0.3'")
+    if doc.get("blyg") != PROTOCOL:
+        problems.add(where, f"blyg is {doc.get('blyg')!r}, expected {PROTOCOL!r}")
     if doc.get("id") != blyg_id or not bs.is_valid_blyg_id(str(doc.get("id"))):
         problems.add(where, f"id {doc.get('id')!r} doesn't match file name / isn't a blyg id")
     if doc.get("origin") != origin:
@@ -319,7 +343,7 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
     if kind != expected_kind:
         problems.add(where, f"kind {kind!r}, ledger says {expected_kind!r}")
     if kind not in ("fragment", "thread", "withdrawn"):
-        problems.add(where, f"kind {kind!r} is not a 0.3 kind (§5.3)")
+        problems.add(where, f"kind {kind!r} is not a 0.4 kind (§5.3)")
 
     version = doc.get("version")
     if version != entry.get("version"):
@@ -382,7 +406,15 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
             problems.add(where, "withdrawal endcap MUST have empty content_md/content_html and media [] (§9)")
         if "generated" in doc:
             problems.add(where, "a withdrawal endcap never carries generated (§5.7 rule 4, §9)")
+        if "links" in doc:
+            problems.add(where, "a withdrawal endcap omits links (§10.3a)")
         return doc
+    for lineno, line in enumerate(content_md.split("\n"), start=1):
+        bad = sorted({f"U+{ord(c):04X}" for c in line
+                      if (ord(c) < 0x20 and c not in "\t\r") or 0xD800 <= ord(c) <= 0xDFFF})
+        if bad:
+            problems.add(where, f"content_md line {lineno} carries {', '.join(bad)} -- no C0 "
+                                f"control (tab, LF, CR aside) or unpaired surrogate (§5.1)")
     if bs.GEN_ANY_RE.search(content_md):
         problems.add(where, "content_md carries blyg-gen markers -- the published "
                             "markdown carries no authoring markup (§5.7)")
@@ -406,23 +438,45 @@ def check_item(blyg_id: str, entry: dict, ledger: dict, origin: str, public_blyg
         problems.add(where, f"content_md links {bs.find_links(content_md)} but the ledger "
                             f"resolved {[link.get('id') for link in links]} -- every [[id]] "
                             f"link MUST resolve (§10.1)")
-    for link in links:
-        if f'href="{origin}{link.get("page")}"' not in content_html:
-            problems.add(where, f"[[{link.get('id')}]] isn't rendered as an anchor to "
-                                f"{origin}{link.get('page')} (§10.1)")
-    check_content_html(where, content_html, origin, public_blyg, problems)
+    occurrences = bs.link_occurrences(content_md)
+    want_links = [{"id": i} for i, _ in occurrences]
+    if doc.get("links", []) != want_links or doc.get("links") == []:
+        problems.add(where, f"links {doc.get('links')!r}, but content_md's [[id]] links make "
+                            f"{want_links!r} -- one {{id}} per link, in document order, the key "
+                            f"omitted when there are none (§10.3a)")
     collected = _collect(content_html)
-    if collected.generated != len(doc.get("generated", [])):
-        problems.add(where, f"content_html wraps {collected.generated} generated span(s) as "
-                            f"blyg-tk-gen, but generated lists {len(doc.get('generated', []))} "
-                            f"-- one entry per span (§5.7)")
+    pages = {link.get("id"): link.get("page") for link in links}
+    for target, label in occurrences:
+        href = (f"{origin}{pages.get(target)}" if with_pages
+                else f"{origin}items/{target}.json")
+        texts = [text for h, text in collected.anchors if h == href]
+        if not texts:
+            problems.add(where, f"[[{target}]] isn't rendered as an anchor to {href} -- with "
+                                f"no page, a link names the item document (§10.1)")
+        elif label is not None and label not in texts:
+            problems.add(where, f"[[{target} | {label}]] isn't rendered with its label as the "
+                                f"anchor text (§10.1)")
+    check_content_html(where, content_html, origin, public_blyg, problems)
+    n_gen = len(doc.get("generated", []))
+    if (collected.generated == 0) != (n_gen == 0) or collected.generated < n_gen \
+            or collected.generated > n_gen + len(baked):
+        problems.add(where, f"content_html wraps {collected.generated} run(s) as blyg-tk-gen, "
+                            f"but generated lists {n_gen} span(s) -- each span is wrapped, and "
+                            f"divided only around a baked quote (§5.7)")
+    if collected.quoted_in_gen:
+        problems.add(where, "a baked quote sits inside a blyg-tk-gen wrapper -- the wrapper "
+                            "MUST be closed before the blockquote and reopened after (§5.7)")
     wrappers = collected.transclusions
-    want = [(t["id"], str(t["version"]), "selector" in t) for t in baked]
+    labels = [bs.directive_label(line) for _, line, _ in directives] if is_thread else []
+    want = [(t["id"], str(t["version"]), "selector" in t,
+             labels[i] if i < len(labels) else None)
+            for i, t in enumerate(baked)]
     if is_thread and wrappers != want:
         problems.add(where, f"content_html bakes {wrappers} but transclusions says {want} -- "
                             f"each directive is baked as <blockquote class=\"blyg-transclusion\" "
                             f"data-blyg-id data-blyg-version>, a partial one with the "
-                            f"blyg-partial class too (§10.2)")
+                            f"blyg-partial class too, a labelled one with data-blyg-label "
+                            f"(§10.2)")
     elif is_thread:
         exact = [t["selector"]["exact"] for t in baked if "selector" in t]
         got = ["\n".join(lines) for lines in collected.partial_lines]
@@ -470,9 +524,18 @@ def text_content(content_html: str) -> str:
     return h.strip(" \n")
 
 
-def wrapper(blyg_id: str, version: int, source_html: str) -> str:
-    return (f'<blockquote class="blyg-transclusion" data-blyg-id="{blyg_id}" '
-            f'data-blyg-version="{version}">{source_html}</blockquote>')
+def go_html_escape(text: str) -> str:
+    """Go's html.EscapeString, which Hugo's htmlEscape is."""
+    for a, b in (("&", "&amp;"), ("'", "&#39;"), ("<", "&lt;"), (">", "&gt;"), ('"', "&#34;")):
+        text = text.replace(a, b)
+    return text
+
+
+def wrapper(blyg_id: str, version: int, source_html: str, label: str | None = None) -> str:
+    attrs = f'data-blyg-id="{blyg_id}" data-blyg-version="{version}"'
+    if label is not None:
+        attrs += f' data-blyg-label="{go_html_escape(label)}"'
+    return f'<blockquote class="blyg-transclusion" {attrs}>{source_html}</blockquote>'
 
 
 def check_snapshots(public_blyg: Path, ledger: dict, docs: dict, problems: Problems) -> None:
@@ -496,8 +559,11 @@ def check_snapshots(public_blyg: Path, ledger: dict, docs: dict, problems: Probl
     for thread_id, doc in sorted(docs.items()):
         if doc.get("kind") != "thread":
             continue
-        for t in doc.get("transclusions") or []:
+        labels = [bs.directive_label(line)
+                  for _, line, _ in bs.find_directives(doc.get("content_md", ""))]
+        for n, t in enumerate(doc.get("transclusions") or []):
             fid, version = t.get("id"), t.get("version")
+            label = labels[n] if n < len(labels) else None
             published = {c.get("version"): c.get("kind")
                          for c in (ledger.get(fid) or {}).get("changelog", [])}
             if version not in published:
@@ -527,7 +593,7 @@ def check_snapshots(public_blyg: Path, ledger: dict, docs: dict, problems: Probl
                     problems.add(f"items/{thread_id}.json",
                                  f"quotes {t['selector'].get('exact')!r} from {fid} v{version}, "
                                  f"which isn't in that version's text (§10.2)")
-            elif reference is not None and wrapper(fid, version, reference) not in doc.get("content_html", ""):
+            elif reference is not None and wrapper(fid, version, reference, label) not in doc.get("content_html", ""):
                 problems.add(f"items/{thread_id}.json",
                              f"the baked snapshot of {fid} v{version} isn't byte-identical to "
                              f"that version's own content_html (§10.2)")
@@ -991,8 +1057,9 @@ def validate(public_dir: Path, ledger_path: Path) -> Problems:
     check_blogroll(public_blyg, manifest, problems)
 
     docs = {}
+    with_pages = pages_built(public_blyg)
     for blyg_id, entry in sorted(ledger.items()):
-        doc = check_item(blyg_id, entry, ledger, origin, public_blyg, problems)
+        doc = check_item(blyg_id, entry, ledger, origin, public_blyg, problems, with_pages)
         if doc is not None:
             docs[blyg_id] = doc
     items_dir = public_blyg / "items"
