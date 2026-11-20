@@ -79,7 +79,7 @@ build
 [ "$(field $thread 'd["version"]')" = 2 ] || fail "thread wasn't republished as v2"
 [ "$(field $thread 'd["transclusions"]')" = "[{'id': '$fragment', 'version': 4}]" ] \
   || fail "republished thread didn't re-resolve to $fragment v4"
-field $thread 'd["content_html"]' | grep -q 'data-blyg-version="4"><p>An edited fragment' \
+grep -q 'data-blyg-version="4"><p>An edited fragment' <<<"$(field $thread 'd["content_html"]')" \
   || fail "republished thread doesn't bake the edited fragment"
 echo "ok: republishing the thread re-resolves to the then-latest version"
 
@@ -93,13 +93,13 @@ stamp
 build
 fragment_page="https://example.org/blyg/f/$fragment/"
 thread_page="https://example.org/blyg/t/$thread/"
-field $fragment 'd["content_html"]' | grep -q "href=\"$fragment_page#fn:1\"" \
+grep -q "href=\"$fragment_page#fn:1\"" <<<"$(field $fragment 'd["content_html"]')" \
   || fail "the fragment's footnote anchor isn't absolute against its own page"
-field $thread 'd["content_html"]' | grep -q "href=\"$fragment_page#fn:1\"" \
+grep -q "href=\"$fragment_page#fn:1\"" <<<"$(field $thread 'd["content_html"]')" \
   || fail "the thread's bake doesn't keep the fragment's absolute footnote anchor"
-field $thread 'd["content_html"]' | grep -q "href=\"$thread_page#fn:1\"" \
+grep -q "href=\"$thread_page#fn:1\"" <<<"$(field $thread 'd["content_html"]')" \
   || fail "the thread's own footnote anchor isn't absolute against its page"
-if field $thread 'd["content_html"]' | grep -q "href=\"#"; then
+if grep -q "href=\"#" <<<"$(field $thread 'd["content_html"]')"; then
   fail "the thread's content_html still carries a relative #anchor"
 fi
 echo "ok: footnote anchors are absolute, quoted ones against their source's page"
@@ -117,8 +117,7 @@ outer=$(sed -n 's/^blyg_id = "\(.*\)"$/\1/p' "$outer_md")
 thread_version=$(field $thread 'd["version"]')
 [ "$(field $outer 'd["transclusions"]')" = "[{'id': '$thread', 'version': $thread_version}]" ] \
   || fail "the quoting thread doesn't name exactly the thread it quotes"
-field $outer 'd["content_html"]' \
-  | grep -q "data-blyg-id=\"$thread\" data-blyg-version=\"$thread_version\"><p>A thread that quotes" \
+grep -q "data-blyg-id=\"$thread\" data-blyg-version=\"$thread_version\"><p>A thread that quotes" <<<"$(field $outer 'd["content_html"]')" \
   || fail "the quoting thread doesn't bake the quoted thread"
 [ "$(field $outer 'd["content_html"].count("data-blyg-id=\"'$fragment'\"")')" = 1 ] \
   || fail "the quoted thread's own quote isn't nested in the bake"
@@ -149,12 +148,11 @@ selection='a root-relative link and an image from the origin’s media directory
 fragment_version=$(field $fragment 'd["version"]')
 [ "$(field $partial "d['transclusions'] == [{'id': '$fragment', 'version': $fragment_version, 'selector': {'exact': '$selection'}}]")" = True ] \
   || fail "the partial transclusion's provenance doesn't carry its selector"
-field $partial 'd["content_html"]' \
-  | grep -qF "<blockquote class=\"blyg-transclusion blyg-partial\" data-blyg-id=\"$fragment\" data-blyg-version=\"$fragment_version\"><p>a root-relative link and an image from the origin’s media directory</p></blockquote>" \
+grep -qF "<blockquote class=\"blyg-transclusion blyg-partial\" data-blyg-id=\"$fragment\" data-blyg-version=\"$fragment_version\"><p>a root-relative link and an image from the origin’s media directory</p></blockquote>" <<<"$(field $partial 'd["content_html"]')" \
   || fail "the partial transclusion doesn't bake the selection as plain text"
-field $partial 'd["content_html"]' | grep -q "See <a href=\"$fragment_page\">An edited fragment with a root-relative link" \
+grep -q "See <a href=\"$fragment_page\">An edited fragment with a root-relative link" <<<"$(field $partial 'd["content_html"]')" \
   || fail "the [[id]] link doesn't render as an anchor to the fragment's page"
-field $partial 'd["content_html"]' | grep -qF "<code>[[$fragment]]</code>" \
+grep -qF "<code>[[$fragment]]</code>" <<<"$(field $partial 'd["content_html"]')" \
   || fail "a [[id]] in code didn't stay text"
 echo "ok: a partial transclusion bakes its selection, and [[id]] links its target"
 
@@ -168,3 +166,75 @@ if err=$(hugo --minify 2>&1); then
 fi
 grep -q "isn't in its text" <<<"$err" || fail "the build failed, but not on the selection: $err"
 echo "ok: a misquoted selection fails the build"
+sed -i.bak 's/origin'"'"'s media/origin’s media/' "$partial_md" && rm "$partial_md.bak"
+stamp
+
+# 10. 0.4's grammar, built: a labelled link renders its label as plain
+#     text (a pipe in a table cell and Markdown inside it included) and
+#     links[] lists one {id} per link; a labelled directive bakes
+#     data-blyg-label; a lazy line belongs to the selection; indented code
+#     is inert; a quote in a generated block is baked outside its
+#     wrapper; and a relative URL resolves against the origin.
+labels_md=content/blyg/2026-09-08-labels.md
+cat > "$labels_md" <<MD
++++
+date = "2026-09-08T12:00:00Z"
+blyg_kind = "thread"
++++
+See [[$fragment | the *first* fragment]] and [[$fragment]].
+
+| cell |
+| --- |
+| [[$fragment | a | b]] |
+
+![[$fragment | Tom & "Jerry"]]
+
+![[$fragment]]
+> a root-relative link and an image from the
+origin’s media directory
+
+    ![[$fragment]] in indented code
+
+{{< blyg-gen model="m" >}}
+Generated words.
+
+![[$fragment]]
+
+More generated words, and [the archive](archive/).
+{{< /blyg-gen >}}
+MD
+stamp
+build
+labels=$(sed -n 's/^blyg_id = "\(.*\)"$/\1/p' "$labels_md")
+html=$(field $labels 'd["content_html"]')
+grep -qF "<a href=\"$fragment_page\">the *first* fragment</a>" <<<"$html" \
+  || fail "a link's label isn't its plain-text anchor text"
+grep -qF "<td><a href=\"$fragment_page\">a | b</a></td>" <<<"$html" \
+  || fail "a label's pipe split its table cell"
+[ "$(field $labels 'd["links"]')" = "[{'id': '$fragment'}, {'id': '$fragment'}, {'id': '$fragment'}]" ] \
+  || fail "links[] isn't one {id} per link"
+grep -qF "data-blyg-version=\"$fragment_version\" data-blyg-label=\"Tom &amp; &#34;Jerry&#34;\">" <<<"$html" \
+  || fail "a labelled directive doesn't bake data-blyg-label"
+[ "$(field $labels "d['transclusions'][1]['selector']['exact']")" = "$selection" ] \
+  || fail "a lazy continuation line isn't part of the selection"
+grep -qF "<code>![[$fragment]] in indented code" <<<"$html" \
+  || fail "a directive in indented code didn't stay text"
+[ "$(field $labels 'len(d["transclusions"])')" = 3 ] || fail "expected three quotes"
+grep -qF '<div class="blyg-tk-gen"><p>Generated words.</p>
+</div><blockquote class="blyg-transclusion"' <<<"$html" \
+  || fail "the generated wrapper isn't closed before the quote"
+grep -qF '</blockquote><div class="blyg-tk-gen">' <<<"$html" \
+  || fail "the generated wrapper isn't reopened after the quote"
+[ "$(field $labels 'len(d["generated"])')" = 1 ] || fail "a divided span is still one entry"
+grep -qF '<a href="https://example.org/blyg/archive/">the archive</a>' <<<"$html" \
+  || fail "a relative URL didn't resolve against the origin"
+echo "ok: labels, links[], lazy selections, indented code, divided wrappers, relative URLs"
+
+# 11. With no pages, a link names the target's item document, never the
+#     permalink convention (§10.1, decision #102).
+rm -rf public
+HUGO_PARAMS_BLYG_PAGES=false hugo --minify --quiet
+python3 "$repo/scripts/blyg_validate.py" >/dev/null
+grep -qF "<a href=\"https://example.org/blyg/items/$fragment.json\">the *first* fragment</a>" <<<"$(field $labels 'd["content_html"]')" \
+  || fail "with no pages, a link doesn't name the item document"
+echo "ok: with no pages, a link names the item document"

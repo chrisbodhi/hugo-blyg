@@ -1,0 +1,15 @@
+{{- /*
+  What an item's in-document "#..." anchors (a footnote, its backlink)
+  are made absolute against, so content_html is self-contained (§5.2):
+  the item's live permalink page while this module writes the pages,
+  else its item document -- the one address every item has. A guessed
+  permalink is never baked into published bytes (0.4, decision #102:
+  the rule §10.1 gives a link's href, applied to anchors too).
+
+    {{ partial "blyg/anchor-base.html" (dict "id" $id "kind" $entry.kind "base" site.BaseURL) }}
+*/ -}}
+{{- $url := printf "%s/blyg/items/%s.json" (strings.TrimSuffix "/" .base) .id -}}
+{{- if partial "blyg/pages-enabled.html" . -}}
+  {{- $url = partial "blyg/permalink.html" . -}}
+{{- end -}}
+{{- return $url -}}

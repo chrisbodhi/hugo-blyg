@@ -2,7 +2,8 @@
 """Stamp content/blyg/*.md with blyg ids and maintain data/blyg/ledger.json.
 
 See docs/conformance.md for the protocol rules this implements
-(blygger-spec docs/protocol-v0.3.md, pinned at 80c8d65).
+(blygger-spec docs/protocol-v0.4.md, pinned at 470f552, the
+2026-11-18 eighteenth revision).
 
 Usage:
     blyg_stamp.py                 stamp everything, write changes
@@ -31,6 +32,7 @@ import secrets
 import subprocess
 import sys
 import tomllib
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -56,20 +58,44 @@ FRONT_MATTER_OPEN = "+++\n"
 # §10.1: a line consisting solely of `![[` + a 26-character item id + `]]`
 # (surrounding whitespace allowed) is a transclusion directive; `![[id@vN]]`
 # is reserved and MUST be rejected at publish time. Anything else that
-# merely looks similar is inert text.
-DIRECTIVE_RE = re.compile(r"^\s*!\[\[(" + BLYG_ID_RE_SRC + r")(@v[0-9]+)?\]\]\s*$")
+# merely looks similar is inert text. From 0.4 either form may carry the
+# author's label after the id: `![[id | text]]`, `[[id | text]]` -- a
+# pipe, optional whitespace around it, and everything up to the first
+# `]]` (a label can't contain one, and may contain another pipe).
+# Resolution ignores it; a link renders it as its anchor text, a
+# directive bakes it as data-blyg-label (§10.2).
+LABEL_RE_SRC = r"(?:[ \t]*\|((?:(?!\]\]).)*))?"
+DIRECTIVE_RE = re.compile(
+    r"^\s*!\[\[(" + BLYG_ID_RE_SRC + r")(@v[0-9]+)?" + LABEL_RE_SRC + r"\]\]\s*$")
 # §10.1 (0.3): the unprefixed inline form `[[` + id + `]]`, anywhere
 # outside code, is a plain internal link, resolved at publish time like a
 # directive and rendered as an absolute anchor to the target's page. A
 # `!`-prefixed one is a directive on a line of its own and inert text
 # anywhere else, never a link.
-INTERNAL_LINK_RE = re.compile(r"(?<!!)\[\[(" + BLYG_ID_RE_SRC + r")\]\]")
+INTERNAL_LINK_RE = re.compile(r"(?<!!)\[\[(" + BLYG_ID_RE_SRC + r")" + LABEL_RE_SRC + r"\]\]")
 # An inline code span: a backtick run, then anything up to the next run
 # of the same length.
 CODE_SPAN_RE = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)")
 # A fence line: the fence and whatever follows it (an opener's info
 # string). live_lines applies the rest of CommonMark's rule.
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# A list item's first line (CommonMark): what keeps an indented line
+# after a blank one list content rather than an indented code block.
+LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
+# A line that starts a block of its own, and so can't be a paragraph's
+# lazy continuation (CommonMark 5.1): an ATX heading, a thematic break, a
+# fence, a list item that may interrupt a paragraph, an HTML block, a
+# blockquote. partials/blyg/bake.html spells the same pattern in RE2.
+BLOCK_START_RE = re.compile(
+    r"^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$"
+    r"|```|~~~|[-*+][ \t]+[^ \t]|1[.)][ \t]+[^ \t]|<|>)")
+
+
+def label_of(raw: str | None) -> str | None:
+    """A label as written after the pipe, trimmed; an empty one is none."""
+    label = (raw or "").strip(" \t")
+    return label or None
+
 
 # §5.7: a machine-generated span is marked in the source with the module's
 # paired shortcode, which renders it as the blyg-tk-gen wrapper:
@@ -204,8 +230,13 @@ def parse_gen(path: Path, body: str) -> list[GenSpan]:
       one, so stripping the markers leaves the span its own paragraphs
       rather than gluing it to its neighbours;
     - an inline span opens and closes on one line;
-    - spans don't nest, aren't empty, and hold no transclusion directive
-      (quotation is transclusion's alone, and never generated, §5.7 rule 3).
+    - spans don't nest and aren't empty;
+    - a transclusion directive inside a block span stands at the left
+      margin, so it bakes as a block of the span's own: generated output
+      may carry one, and the bake closes the blyg-tk-gen wrapper before
+      the quote and reopens it after, so no quoted word is marked as
+      generated (0.4, §5.7, decision #102). The span keeps one
+      `generated` entry; a wrapper is a run of its words.
 
     Markers count inside code fences too: Hugo expands shortcodes there."""
     lines = body.split("\n")
@@ -272,10 +303,11 @@ def parse_gen(path: Path, body: str) -> list[GenSpan]:
 
     for lineno, line, _ in find_directives(body):
         for s in spans:
-            if s.block and s.line < lineno < s.end:
+            if s.block and s.line < lineno < s.end and lines[lineno - 1][:1] in (" ", "\t"):
                 fail(lineno, f"{line!r} sits inside the generated span opened on line "
-                             f"{s.line} -- a transclusion is quotation, never generation "
-                             f"(§5.7 rule 3); close the span before it")
+                             f"{s.line}, indented -- a quote in generated output is baked "
+                             f"outside the blyg-tk-gen wrapper (§5.7), which needs it at the "
+                             f"span's top level; unindent it")
     return spans
 
 
@@ -328,24 +360,61 @@ def authored_gen(spans: list) -> tuple[str, ...]:
                             sort_keys=True) for s in spans)
 
 
+def indent_columns(line: str) -> int:
+    """A line's leading whitespace in columns, a tab reaching the next
+    multiple of four (CommonMark 2.2)."""
+    col = 0
+    for c in line:
+        if c == " ":
+            col += 1
+        elif c == "\t":
+            col += 4 - col % 4
+        else:
+            break
+    return col
+
+
 def live_lines(body: str):
-    """(line number, line) for every line of `body` outside fenced code
-    blocks, whose contents are inert text (§10.1)."""
+    """(line number, line) for every line of `body` outside code blocks,
+    whose contents are inert text (§10.1). Where code is, is CommonMark's
+    to say (0.4, decision #102): a fenced block, or an indented one -- a
+    line indented four columns or more (a tab counts as four) after a
+    blank line or at the start of the body, outside a list, where it
+    can't be a paragraph's continuation. The same line directly under a
+    paragraph line is live. Lists are approximated: from a list item's
+    first line until a blank line and an unindented line that isn't one,
+    an indented line is list content, not code; partials/blyg/bake.html
+    fails the build where Markdown reads a line otherwise."""
     fence: str | None = None
+    code = in_list = False
+    after_blank = True
     for lineno, line in enumerate(body.split("\n"), start=1):
         m = FENCE_RE.match(line)
-        if fence is None:
-            # CommonMark: a backtick fence's info string may not contain a
-            # backtick -- "```a`b" is a paragraph with inline code, so the
-            # lines after it are live, not fenced (issue #7).
-            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-                fence = m.group(1)
-                continue
-        else:
+        if fence is not None:
             if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) \
                     and not m.group(2).strip():
                 fence = None
             continue
+        if not line.strip():
+            after_blank = True
+            continue
+        if indent_columns(line) >= 4:
+            if code or (after_blank and not in_list):
+                code, after_blank = True, False
+                continue
+        else:
+            code = False
+            if LIST_ITEM_RE.match(line):
+                in_list = True
+            elif after_blank and indent_columns(line) == 0:
+                in_list = False
+            # CommonMark: a backtick fence's info string may not contain a
+            # backtick -- "```a`b" is a paragraph with inline code, so the
+            # lines after it are live, not fenced (issue #7).
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence, after_blank = m.group(1), False
+                continue
+        after_blank = False
         yield lineno, line
 
 
@@ -388,10 +457,13 @@ def selection_text(quoted: list[str]) -> str:
 def partial_selection(lines: list[str], lineno: int) -> tuple[str | None, int]:
     """(selection, last line) for the directive on 1-based `lineno`:
     (None, lineno) for a whole transclusion, or the attached blockquote's
-    selection and its last line for a partial one (§10.1). Raises
-    ValueError when the blockquote runs on into an unquoted line --
-    Markdown would read that as more of the quote (a lazy continuation),
-    the bake wouldn't -- or quotes nothing."""
+    selection and its last line for a partial one (§10.1). The
+    blockquote's extent is CommonMark's (0.4, decision #76): an unquoted
+    line straight after a quoted one with text is a lazy continuation,
+    part of the selection, unless it starts a block of its own -- or is a
+    directive, which the grammar reads before Markdown does, so it ends
+    the selection (0.4, ninth revision). Raises ValueError when the
+    blockquote quotes nothing."""
     quoted = []
     i = lineno  # the 0-based index of the line after the directive
     while i < len(lines) and lines[i].lstrip(" \t").startswith(">"):
@@ -400,11 +472,10 @@ def partial_selection(lines: list[str], lineno: int) -> tuple[str | None, int]:
         i += 1
     if not quoted:
         return None, lineno
-    if i < len(lines) and lines[i].strip(" \t\r"):
-        raise ValueError(
-            f"the quoted selection after it runs on into body line {i + 1}, which "
-            f"Markdown would read as part of the quote -- end the selection with a "
-            f"blank line")
+    while quoted[-1].strip(" \t\r") and i < len(lines) and lines[i].strip(" \t\r") \
+            and not BLOCK_START_RE.match(lines[i]) and not DIRECTIVE_RE.match(lines[i]):
+        quoted.append(lines[i])
+        i += 1
     selection = selection_text(quoted)
     if not selection:
         raise ValueError("the blockquote attached to it quotes nothing")
@@ -423,20 +494,37 @@ def selections(body: str) -> dict[int, tuple[str, int]]:
     return found
 
 
-def find_links(body: str) -> list[str]:
-    """The ids of every plain internal link `[[id]]` (§10.1) in `body`, in
-    order of first use: outside code spans and fenced code, and outside
-    partial transclusions' selections, which bake as quoted plain text."""
+def link_occurrences(body: str) -> list[tuple[str, str | None]]:
+    """(id, label) for every plain internal link `[[id]]` or `[[id |
+    label]]` (§10.1) in `body`, in document order, one per link -- what
+    the item document's `links[]` lists (§10.3a): outside code spans and
+    code blocks, outside directive lines, and outside partial
+    transclusions' selections, which bake as quoted plain text."""
     quoted = {n for first, (_, last) in selections(body).items()
               for n in range(first + 1, last + 1)}
-    ids: list[str] = []
+    found: list[tuple[str, str | None]] = []
     for lineno, line in live_lines(body):
-        if lineno in quoted:
+        if lineno in quoted or DIRECTIVE_RE.match(line):
             continue
         for m in INTERNAL_LINK_RE.finditer(CODE_SPAN_RE.sub("", line)):
-            if m.group(1) not in ids:
-                ids.append(m.group(1))
+            found.append((m.group(1), label_of(m.group(2))))
+    return found
+
+
+def find_links(body: str) -> list[str]:
+    """The ids `body` links (§10.1), in order of first use: what the
+    ledger resolves, once per target."""
+    ids: list[str] = []
+    for target, _ in link_occurrences(body):
+        if target not in ids:
+            ids.append(target)
     return ids
+
+
+def directive_label(line: str) -> str | None:
+    """The label a directive line carries (§10.1), or None."""
+    m = DIRECTIVE_RE.match(line)
+    return label_of(m.group(3)) if m else None
 
 
 LINK_TEXT_CAP = 60
@@ -458,13 +546,40 @@ def link_text(body: str) -> str:
             continue
         text = re.sub(r"^\s*(#{1,6}\s+|(>\s*)+|[-*+]\s+|\d+[.)]\s+)", "", line)
         text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
-        text = re.sub(r"\[\[(" + BLYG_ID_RE_SRC + r")\]\]|[*_`]", "", text)
+        text = INTERNAL_LINK_RE.sub(lambda m: label_of(m.group(2)) or "", text)
+        text = re.sub(r"[*_`]", "", text)
         text = TEXT_WS_RE.sub(" ", text).strip()
         if text:
             if len(text) > LINK_TEXT_CAP:
                 text = text[:LINK_TEXT_CAP].rsplit(" ", 1)[0].rstrip(" ,.;:") + "\u2026"
             return text
     return ""
+
+
+def check_text(path: Path, content_md: str) -> str | None:
+    """§5.1 (0.4, decision #103): content_md is text. A C0 control other
+    than tab, LF and CR, or an unpaired surrogate, MUST NOT be published
+    -- none can appear in well-formed XML, so one would make all of
+    feed.xml unparseable -- and U+FFFE/U+FFFF SHOULD NOT be. Returns a
+    warning when the text isn't in Unicode Normalization Form C, which a
+    publisher SHOULD publish (the hash is over the bytes as written, so
+    nothing is ever renormalized here)."""
+    for lineno, line in enumerate(content_md.split("\n"), start=1):
+        for c in line:
+            o = ord(c)
+            if (o < 0x20 and c not in "\t\r") or 0xD800 <= o <= 0xDFFF:
+                raise BlygStampError(
+                    f"{path}: body line {lineno}: U+{o:04X} -- content_md MUST NOT carry "
+                    f"a C0 control character (tab, LF and CR aside) or an unpaired "
+                    f"surrogate (§5.1); remove it")
+            if o in (0xFFFE, 0xFFFF):
+                return (f"{path.name}: body line {lineno} carries U+{o:04X}, which §5.1 says "
+                        f"publishers SHOULD NOT publish")
+    if not unicodedata.is_normalized("NFC", content_md):
+        return (f"{path.name}: content_md isn't in Unicode Normalization Form C, which "
+                f"§5.1 says publishers SHOULD publish (a quote of it then may not match "
+                f"what the eye sees); published as written")
+    return None
 
 
 def check_directives(path: Path, body: str, kind: str) -> None:
@@ -492,9 +607,9 @@ def check_directives(path: Path, body: str, kind: str) -> None:
         if kind != "thread":
             raise BlygStampError(
                 f"{path}: body line {lineno}: {line!r} is a transclusion "
-                f"directive (§10.1), but only threads transclude -- set "
-                f"blyg_kind = \"thread\", or put it inside a code fence to "
-                f"keep it as inert text.")
+                f"directive (§10.1), but a directive belongs to a thread, and a "
+                f"fragment carrying one is a publish error -- quote it from a "
+                f"thread, or put it inside a code fence to keep it as inert text.")
     lines = body.split("\n")
     for lineno, line, _ in find_directives(body):
         try:
@@ -874,10 +989,13 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
         resolve_link = lambda target: "no link resolver given"  # noqa: E731
     if not item.withdrawn_flag:
         check_directives(item.path, item.body, item.kind)
+        warnings = [check_text(item.path, item.content_md)]
+        # §5.3: a cap in characters counts code points, as len() does.
         if item.kind == "fragment" and len(item.content_md) > FRAGMENT_SOFT_CAP:
-            warning = (f"{item.path.name}: fragment content_md is {len(item.content_md)} "
-                       f"characters; §5.3 says publishers SHOULD cap fragments "
-                       f"at {FRAGMENT_SOFT_CAP}")
+            warnings.append(f"{item.path.name}: fragment content_md is {len(item.content_md)} "
+                            f"characters; §5.3 says publishers SHOULD cap fragments "
+                            f"at {FRAGMENT_SOFT_CAP}")
+        warning = "\nwarning: ".join(w for w in warnings if w) or None
 
     if item.blyg_id is None:
         if item.draft:
@@ -967,6 +1085,23 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
             f"forever once published (§4). Use blyg_withdrawn = true instead. "
             f"(If this item has genuinely never shipped, remove its blyg_id "
             f"line and its ledger entry to turn it back into a draft.)")
+
+    # §5.3 (0.4, decision #100): an item's kind is fixed at its first
+    # publication. Withdrawal is the one change of kind, and returning
+    # restores the kind it had. With --amend, a version that never
+    # shipped is no publication yet, so a never-shipped item may still
+    # change; once one has, the shipped kind holds.
+    fixed_kind = entry["kind"]
+    if published is not None:
+        shipped = published.get(item.blyg_id)
+        fixed_kind = shipped["kind"] if shipped else None
+    if fixed_kind is not None and item.kind != fixed_kind:
+        raise BlygStampError(
+            f"{item.path}: blyg_kind is {item.kind!r}, but {item.blyg_id} was published "
+            f"as a {fixed_kind}, and an item's kind is fixed at its first publication "
+            f"(§5.3) -- set blyg_kind = \"{fixed_kind}\" back. To quote this "
+            f"{'fragment' if fixed_kind == 'fragment' else 'thread'}'s words in a "
+            f"{item.kind}, publish a new {item.kind} that does.")
 
     new_entry = copy.deepcopy(entry)
     if entry["path"] != item.rel_path:
@@ -1085,8 +1220,6 @@ def plan_for_item(item: Item, ledger: dict, *, write: bool,
         detail = {"withdraw": f"would withdraw: endcap v{version} @ {at_now}",
                   "return": f"would return: v{version} @ {at_now}"}.get(
             plan_kind, f"would bump v{entry['version']} -> v{version} @ {at_now}")
-    if current[0] != desired[0] and not desired[1]:
-        detail += f" (kind {current[0]} -> {desired[0]})"
     return Plan(kind=plan_kind, path=item.path, blyg_id=item.blyg_id, detail=detail,
                 ledger_entry=(new_entry if write else None), warning=warning,
                 next_entry=new_entry)

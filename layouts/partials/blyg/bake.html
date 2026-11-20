@@ -1,9 +1,11 @@
 {{- /*
   Renders one item version's content_html, baking its transclusions
   (§10.2) -- the item's own, and recursively a quoted thread's -- and
-  its plain internal links (§10.1):
+  its plain internal links (§10.1). Returns a dict: "html", the
+  content_html, and "links", the item document's links[] (§10.3a) --
+  {id} per link rendered, in document order:
 
-    {{ $html := partial "blyg/bake.html" (dict
+    {{ $baked := partial "blyg/bake.html" (dict
          "page" $page "raw" $page.RawContent "html" $page.Content
          "snapshots" $entry.transclusions "links" $entry.links
          "hash" $entry.last_hash "file" $file "base" $base "self" $self) }}
@@ -23,12 +25,13 @@
                  links, if it has any; and a partial transclusion's
                  selection.
     links     -- the ledger's resolved [[id]] links for this version:
-                 {id, page, text}.
+                 {id, page, text}, once per target.
     hash      -- this version's content_hash, salting the placeholders.
     file      -- the item being built, for error messages.
     base      -- the site's base URL, without a trailing slash.
-    self      -- the absolute URL of the page this content belongs to:
-                 what its "#..." anchors resolve against (§5.2).
+    self      -- the absolute URL of the page this content belongs to
+                 (partials/blyg/anchor-base.html): what its "#..."
+                 anchors resolve against (§5.2).
 
   scripts/blyg_stamp.py resolves each `![[id]]` directive when a thread's
   version is created and stores the snapshot it resolved to. Baking from
@@ -45,19 +48,51 @@
   still sits at the baked version. A quoted thread's snapshot bakes its
   own snapshots the same way, so nesting is nested blockquotes. A
   partial transclusion's placeholder takes its attached blockquote's
-  lines too, and bakes as the selection's plain text, once the source's
-  text content is checked to contain it. The
-  placeholder is letters and digits only (nothing goldmark or the
+  lines too -- lazy continuation lines included (CommonMark's extent,
+  0.4) -- and bakes as the selection's plain text, once the source's
+  text content is checked to contain it. A directive's label (0.4,
+  `![[id | text]]`) is baked as data-blyg-label. A quote inside a
+  generated block (§5.7) is baked outside its blyg-tk-gen wrapper, which
+  is closed before the blockquote and reopened after.
+
+  Each [[id]] link is swapped for a placeholder before rendering, too, so
+  its label stays plain text (0.4: no Markdown or HTML in a label is
+  interpreted) and a pipe in it can't split a table cell. After
+  rendering, a placeholder inside code is put back as the literal text
+  it was, and every other one becomes the anchor.
+
+  Placeholders are letters and digits only (nothing goldmark or the
   typographer will touch) and salted with this body's hash, so authored
-  text can't collide with it.
+  text can't collide with them.
 */ -}}
 {{- $page := .page -}}
 {{- $file := .file -}}
 {{- $base := .base -}}
 {{- $origin := printf "%s/blyg/" $base -}}
+{{- $pages := partial "blyg/pages-enabled.html" $page -}}
 {{- $snapshots := .snapshots | default slice -}}
 {{- $salt := substr (strings.TrimPrefix "sha256:" .hash) 0 16 -}}
 {{- $lines := split .raw "\n" -}}
+{{- /* RE2 spellings of blyg_stamp.py's DIRECTIVE_RE and BLOCK_START_RE:
+       a label runs to the first "]]" and holds no newline. */ -}}
+{{- $idRE := `[0-9a-hjkmnp-tv-z]{26}` -}}
+{{- $labelRE := `(?:[ \t]*\|((?:[^\]\n]|\][^\]\n])*))?` -}}
+{{- $anyDirective := printf `^\s*!\[\[%s(?:@v[0-9]+)?%s\]\]\s*$` $idRE $labelRE -}}
+{{- $blockStart := "^ {0,3}(?:#{1,6}(?:[ \\t]|$)|(?:\\*[ \\t]*){3,}$|(?:-[ \\t]*){3,}$|(?:_[ \\t]*){3,}$|```|~~~|[-*+][ \\t]+[^ \\t]|1[.)][ \\t]+[^ \\t]|<|>)" -}}
+
+{{- /* The lines inside a block blyg-gen span (§5.7): a marker alone on
+       its line opens or closes one, as blyg_stamp.py's parse_gen reads. */ -}}
+{{- $genOpen := `^[ \t]*\{\{<[ \t]*blyg-gen(?:[ \t]+[a-z]+="[^"]*")*[ \t]*>\}\}[ \t]*$` -}}
+{{- $genClose := `^[ \t]*\{\{<[ \t]*/blyg-gen[ \t]*>\}\}[ \t]*$` -}}
+{{- $inGen := dict -}}
+{{- $open := false -}}
+{{- range $i, $line := $lines -}}
+  {{- if findRE $genOpen $line 1 -}}{{- $open = true -}}
+  {{- else if findRE $genClose $line 1 -}}{{- $open = false -}}
+  {{- else if $open -}}{{- $inGen = merge $inGen (dict (string (add $i 1)) true) -}}
+  {{- end -}}
+{{- end -}}
+
 {{- $bakes := slice -}}
 {{- range $i, $s := $snapshots -}}
   {{- $n := int $s.line -}}
@@ -65,18 +100,32 @@
     {{- errorf "blyg: %s: the ledger's transclusion of %s names body line %d, which doesn't exist -- rerun scripts/blyg_stamp.py" $file $s.id $n -}}
   {{- end -}}
   {{- $line := index $lines (sub $n 1) -}}
-  {{- if ne (trim $line " \t\r") (printf "![[%s]]" $s.id) -}}
+  {{- $directive := findRESubmatch (printf `^[ \t]*!\[\[%s%s\]\][ \t\r]*$` $s.id $labelRE) $line 1 -}}
+  {{- if not $directive -}}
     {{- errorf "blyg: %s body line %d is %q, but the ledger bakes ![[%s]] there -- rerun scripts/blyg_stamp.py" $file $n $line $s.id -}}
   {{- end -}}
+  {{- $label := trim (index (index $directive 0) 1) " \t" -}}
   {{- /* §10.1: a blockquote attached to the directive (no blank line) is
-         a partial transclusion's selection. Its lines go with the
-         directive; blyg_stamp.py parsed them into the ledger's
+         a partial transclusion's selection, to CommonMark's extent: its
+         ">" lines, then any lazy continuation lines -- unquoted text
+         straight after a quoted line with text, up to a blank line, a
+         line that starts a block of its own, or a directive. Its lines go
+         with the directive; blyg_stamp.py parsed them into the ledger's
          "selection", which a snapshot stamped before 0.3 doesn't have --
          baking that as a whole quote would misquote, so it fails. */ -}}
   {{- $last := $n -}}
+  {{- $lastText := "" -}}
   {{- range after $n $lines -}}
-    {{- if not (hasPrefix (strings.TrimLeft " \t" .) ">") -}}{{- break -}}{{- end -}}
+    {{- $quoted := strings.TrimLeft " \t" . -}}
+    {{- if not (hasPrefix $quoted ">") -}}{{- break -}}{{- end -}}
     {{- $last = add $last 1 -}}
+    {{- $lastText = trim (strings.TrimPrefix ">" $quoted) " \t\r" -}}
+  {{- end -}}
+  {{- if and (gt $last $n) $lastText -}}
+    {{- range after $last $lines -}}
+      {{- if or (not (trim . " \t\r")) (findRE $blockStart . 1) (findRE $anyDirective . 1) -}}{{- break -}}{{- end -}}
+      {{- $last = add $last 1 -}}
+    {{- end -}}
   {{- end -}}
   {{- if ne (gt $last $n) (isset $s "selection") -}}
     {{- errorf "blyg: %s body line %d: ![[%s]] %s -- rerun scripts/blyg_stamp.py (§10.1)" $file $n $s.id (cond (gt $last $n) "has a blockquote attached, a partial transclusion, but the ledger bakes a whole one" "has no blockquote attached, but the ledger bakes a partial one") -}}
@@ -92,13 +141,16 @@
   {{- /* Made absolute in the source's own page context, exactly as the
          source's own content_html was -- a quoted footnote anchor
          points at the source's page, not this thread's. */ -}}
-  {{- $sourcePage := partial "blyg/permalink.html" (dict "id" $s.id "kind" (index site.Data.blyg.ledger $s.id).kind "base" $base) -}}
-  {{- $quoted := partial "blyg/bake.html" (dict
+  {{- $sourcePage := partial "blyg/anchor-base.html" (dict "id" $s.id "kind" (index site.Data.blyg.ledger $s.id).kind "base" $base) -}}
+  {{- $quoted := (partial "blyg/bake.html" (dict
       "page" $source "raw" $s.content_md "snapshots" ($s.transclusions | default slice)
       "links" ($s.links | default slice)
-      "hash" $s.content_hash "file" $file "base" $base "self" $sourcePage) -}}
-  {{- $wrapped := printf `<blockquote class="blyg-transclusion" data-blyg-id="%s" data-blyg-version="%d">%s</blockquote>`
-        $s.id (int $s.version) $quoted -}}
+      "hash" $s.content_hash "file" $file "base" $base "self" $sourcePage)).html -}}
+  {{- /* §10.2: own-origin, so no data-blyg-origin; data-blyg-label only
+         with a label, verbatim and HTML-escaped. */ -}}
+  {{- $attrs := printf `data-blyg-id="%s" data-blyg-version="%d"` $s.id (int $s.version) -}}
+  {{- with $label -}}{{- $attrs = printf `%s data-blyg-label="%s"` $attrs (htmlEscape .) -}}{{- end -}}
+  {{- $wrapped := printf `<blockquote class="blyg-transclusion" %s>%s</blockquote>` $attrs $quoted -}}
   {{- with $s.selection -}}
     {{- /* §10.2: the selection MUST be a substring of the source's text
            content at the baked version, or it's a publish error; the
@@ -108,64 +160,102 @@
     {{- end -}}
     {{- $paras := slice -}}
     {{- range split . "\n" -}}{{- $paras = $paras | append (printf "<p>%s</p>" (htmlEscape .)) -}}{{- end -}}
-    {{- $wrapped = printf `<blockquote class="blyg-transclusion blyg-partial" data-blyg-id="%s" data-blyg-version="%d">%s</blockquote>`
-          $s.id (int $s.version) (delimit $paras "") -}}
+    {{- $wrapped = printf `<blockquote class="blyg-transclusion blyg-partial" %s>%s</blockquote>`
+          $attrs (delimit $paras "") -}}
   {{- end -}}
   {{- $indent := index (findRE `^[ \t]*` $line 1) 0 | default "" -}}
   {{- $bakes = $bakes | append (dict
       "token" (printf "blygtransclusion%sn%d" $salt $i) "line" $n "last" $last
-      "indent" $indent "html" $wrapped
+      "indent" $indent "html" $wrapped "gen" (isset $inGen (string $n))
   ) -}}
 {{- end -}}
 
+{{- /* The source's lines -- blyg-gen markers and all -- which is what the
+       ledger's line numbers count and what renders the wrappers, with
+       each directive (and its selection) swapped for its placeholder. */ -}}
+{{- $out := slice -}}
+{{- $skipTo := 0 -}}
+{{- range $i, $line := $lines -}}
+  {{- $at := add $i 1 -}}
+  {{- $replaced := false -}}
+  {{- range $bakes -}}
+    {{- if eq .line $at -}}
+      {{- $out = $out | append "" (printf "%s%s" .indent .token) "" -}}
+      {{- $replaced = true -}}
+      {{- $skipTo = .last -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if and (not $replaced) (gt $at $skipTo) -}}{{- $out = $out | append $line -}}{{- end -}}
+{{- end -}}
+{{- $src := delimit $out "\n" -}}
+
+{{- /* §10.1: every [[id]] or [[id | label]] not preceded by "!", swapped
+       for a placeholder -- in code too, put back below. Line by line, so
+       a match at a line's start is the line's first occurrence of its
+       text; twice, since a match consumes the character before it, so a
+       link right after another is only found on the second pass. */ -}}
+{{- $linkRE := printf `(^|[^!])(\[\[(%s)%s\]\])` $idRE $labelRE -}}
+{{- $found := slice -}}
+{{- $rewritten := slice -}}
+{{- range split $src "\n" -}}
+  {{- $line := . -}}
+  {{- range seq 2 -}}
+    {{- range findRESubmatch $linkRE $line -}}
+      {{- $token := printf "blyglink%sn%dx" $salt (len $found) -}}
+      {{- $found = $found | append (dict "token" $token "text" (index . 2) "id" (index . 3)
+          "label" (trim (index . 4) " \t")) -}}
+      {{- $line = replace $line (index . 0) (printf "%s%s" (index . 1) $token) 1 -}}
+    {{- end -}}
+  {{- end -}}
+  {{- $rewritten = $rewritten | append $line -}}
+{{- end -}}
+{{- $src = delimit $rewritten "\n" -}}
+
 {{- $html := "" -}}
-{{- if and (not $bakes) .html -}}
+{{- if and (not $bakes) (not $found) .html -}}
   {{- $html = printf "%s" .html -}}
 {{- else -}}
-  {{- /* The source's lines -- blyg-gen markers and all -- which is what the
-         ledger's line numbers count and what renders the wrappers. */ -}}
-  {{- $out := slice -}}
-  {{- $skipTo := 0 -}}
-  {{- range $i, $line := $lines -}}
-    {{- $at := add $i 1 -}}
-    {{- $replaced := false -}}
-    {{- range $bakes -}}
-      {{- if eq .line $at -}}
-        {{- $out = $out | append "" (printf "%s%s" .indent .token) "" -}}
-        {{- $replaced = true -}}
-        {{- $skipTo = .last -}}
-      {{- end -}}
-    {{- end -}}
-    {{- if and (not $replaced) (gt $at $skipTo) -}}{{- $out = $out | append $line -}}{{- end -}}
-  {{- end -}}
-  {{- $html = printf "%s" ($page.RenderString (dict "display" "block") (delimit $out "\n")) -}}
+  {{- $html = printf "%s" ($page.RenderString (dict "display" "block") $src) -}}
 {{- end -}}
 
-{{- /*
-  §10.1: each plain internal link [[id]] outside code becomes an
-  ordinary anchor to the page blyg_stamp.py resolved for it, with the
-  anchor text it recorded. Code spans and blocks are set aside first,
-  where the form is inert text, as is a "!"-prefixed one. A live one the
-  ledger didn't resolve fails the build: shipping the literal text
-  would be wrong.
-*/ -}}
-{{- $codes := findRE `(?s)<pre\b.*?</pre>|<code\b.*?</code>` $html -}}
-{{- range $i, $c := $codes -}}
-  {{- $html = replace $html $c (printf "blygcode%sn%dx" $salt $i) 1 -}}
+{{- /* Inside code, the form is inert text (§10.1): put it back, escaped as
+       goldmark escapes code. */ -}}
+{{- range findRE `(?s)<pre\b.*?</pre>|<code\b.*?</code>` $html -}}
+  {{- $code := . -}}
+  {{- range $found -}}
+    {{- $literal := replace (replace (replace (replace .text "&" "&amp;") "<" "&lt;") ">" "&gt;") `"` "&quot;" -}}
+    {{- $code = replace $code .token $literal -}}
+  {{- end -}}
+  {{- if ne $code . -}}{{- $html = replace $html . $code 1 -}}{{- end -}}
+{{- end -}}
+
+{{- /* Every other placeholder is a link: an anchor to the target's page,
+       absolute (§10.1), or, while this module writes no pages, to its
+       item document -- never a guessed permalink (0.4, decision #102).
+       The anchor text is the label when the author wrote one, else the
+       text blyg_stamp.py recorded. Each is one links[] entry (§10.3a), in
+       the order rendered. A link the ledger didn't resolve fails the
+       build: shipping the literal text would be wrong. */ -}}
+{{- $resolved := dict -}}
+{{- range .links -}}{{- $resolved = merge $resolved (dict .id .) -}}{{- end -}}
+{{- $byToken := dict -}}
+{{- range $found -}}{{- $byToken = merge $byToken (dict .token .) -}}{{- end -}}
+{{- $links := slice -}}
+{{- range findRE (printf `blyglink%sn[0-9]+x` $salt) $html -}}
+  {{- $l := index $byToken . -}}
+  {{- $r := index $resolved $l.id -}}
+  {{- if not $r -}}
+    {{- errorf "blyg: %s renders %s, a plain internal link (§10.1) the ledger didn't resolve -- rerun scripts/blyg_stamp.py" $file $l.text -}}
+  {{- end -}}
+  {{- $href := cond $pages (printf "%s%s" $origin $r.page) (printf "%sitems/%s.json" $origin $l.id) -}}
+  {{- $html = replace $html . (printf `<a href="%s">%s</a>` $href (htmlEscape ($l.label | default $r.text))) 1 -}}
+  {{- $links = $links | append (dict "id" $l.id) -}}
 {{- end -}}
 {{- range .links -}}
-  {{- $a := printf `<a href="%s%s">%s</a>` $origin .page (htmlEscape .text) -}}
-  {{- $pattern := printf `(^|[^!])\[\[%s\]\]` .id -}}
-  {{- /* Twice: a match consumes the character before it, so a link right
-         after another is only found on the second pass. */ -}}
-  {{- $html = replaceRE $pattern (printf "${1}%s" (replace $a "$" "$$")) $html -}}
-  {{- $html = replaceRE $pattern (printf "${1}%s" (replace $a "$" "$$")) $html -}}
-{{- end -}}
-{{- with findRE `(^|[^!])\[\[[0-9a-hjkmnp-tv-z]{26}\]\]` $html 1 -}}
-  {{- errorf "blyg: %s renders %s, a plain internal link (§10.1) the ledger didn't resolve -- rerun scripts/blyg_stamp.py" $file (index . 0) -}}
-{{- end -}}
-{{- range $i, $c := $codes -}}
-  {{- $html = replace $html (printf "blygcode%sn%dx" $salt $i) $c 1 -}}
+  {{- $id := .id -}}
+  {{- if not (where $links "id" $id) -}}
+    {{- errorf "blyg: %s: the ledger resolves a link to %s, but nothing renders one (inside code or raw HTML, by Markdown's reading?) -- rerun scripts/blyg_stamp.py, or fence it" $file $id -}}
+  {{- end -}}
 {{- end -}}
 
 {{- range $bakes -}}
@@ -173,8 +263,18 @@
   {{- if ne (len (findRE $para $html)) 1 -}}
     {{- errorf "blyg: %s: the transclusion directive on body line %d didn't render as a paragraph of its own (inside an indented code block or raw HTML?), so there's nowhere to bake it" $file .line -}}
   {{- end -}}
-  {{- $html = replace $html $para .html -}}
+  {{- $bake := .html -}}
+  {{- if .gen -}}
+    {{- /* §5.7 (0.4, decision #102): a baked quote is never inside the
+           wrapper. Close it before the blockquote, reopen it after. */ -}}
+    {{- $bake = printf `</div>%s<div class="blyg-tk-gen">` $bake -}}
+  {{- end -}}
+  {{- $html = replace $html $para $bake -}}
 {{- end -}}
+{{- /* A wrapper split at its edge leaves an empty one, marking nothing. */ -}}
+{{- $html = replaceRE `<div class="blyg-tk-gen">\s*</div>` "" $html -}}
 {{- /* content_html is self-contained (§5.2): every URL absolute. Already-
        absolute bakes and links pass through untouched. */ -}}
-{{- return partial "blyg/absolute-urls.html" (dict "html" $html "base" $base "page" .self) -}}
+{{- return dict
+    "html" (partial "blyg/absolute-urls.html" (dict "html" $html "base" $base "page" .self "origin" $origin))
+    "links" $links -}}

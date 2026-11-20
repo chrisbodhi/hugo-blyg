@@ -629,9 +629,23 @@ class PartialAndLinkGrammarTests(unittest.TestCase):
         body = f"![[{self.ID}]]\n> one\n>   wrapped\n>\n>two\n"
         self.assertEqual(bs.selections(body), {1: ("one wrapped\ntwo", 5)})
 
-    def test_a_selection_running_on_is_refused(self):
-        with self.assertRaisesRegex(ValueError, "blank line"):
-            bs.selections(f"![[{self.ID}]]\n> quoted\nnot quoted\n")
+    def test_a_lazy_continuation_line_is_part_of_the_selection(self):
+        # 0.4 (#76): the blockquote's extent is CommonMark's.
+        body = f"![[{self.ID}]]\n> quoted\nlazily, still quoted\n\nMine.\n"
+        self.assertEqual(bs.selections(body), {1: ("quoted lazily, still quoted", 3)})
+
+    def test_what_ends_a_lazy_continuation(self):
+        # A line that starts a block of its own, a quoted blank line, and
+        # a directive (read before Markdown sees it) all end the selection.
+        for after in ("# heading", "- item", "1. item", "***", "```", "<div>",
+                      f"![[{self.ID}]]", f"![[{self.ID}@v2]]"):
+            self.assertEqual(bs.selections(f"![[{self.ID}]]\n> quoted\n{after}\n")[1],
+                             ("quoted", 2), after)
+        self.assertEqual(bs.selections(f"![[{self.ID}]]\n> quoted\n>\nnot quoted\n")[1],
+                         ("quoted", 3))
+        # "2." can't interrupt a paragraph, so it's a lazy line.
+        self.assertEqual(bs.selections(f"![[{self.ID}]]\n> quoted\n2. on\n")[1],
+                         ("quoted 2. on", 3))
 
     def test_an_empty_selection_is_refused(self):
         with self.assertRaisesRegex(ValueError, "quotes nothing"):
@@ -641,6 +655,36 @@ class PartialAndLinkGrammarTests(unittest.TestCase):
         other = "5cx94j6wbmzrdnnjxvs9j1nkba"
         body = f"See [[{other}]], [[{self.ID}]] and [[{other}]] again.\n"
         self.assertEqual(bs.find_links(body), [other, self.ID])
+        # links[] is one entry per link (§10.3a), not per target.
+        self.assertEqual([i for i, _ in bs.link_occurrences(body)], [other, self.ID, other])
+
+    def test_labels(self):
+        # 0.4 (#70): [[id | text]], trimmed, a pipe allowed in it, up to the
+        # first ]]; an empty label is none. Label-first is literal text.
+        cases = {f"[[{self.ID} | the opening]]": "the opening",
+                 f"[[{self.ID}|tight]]": "tight",
+                 f"[[{self.ID}   |   padded   ]]": "padded",
+                 f"[[{self.ID} | a | b]]": "a | b",
+                 f"[[{self.ID} |  ]]": None,
+                 f"[[{self.ID} | cut]] here]]": "cut"}
+        for body, label in cases.items():
+            self.assertEqual(bs.link_occurrences(body), [(self.ID, label)], body)
+        self.assertEqual(bs.link_occurrences(f"[[a label | {self.ID}]]"), [])
+        self.assertEqual(bs.link_occurrences(f"`[[{self.ID} | in code]]`"), [])
+        self.assertEqual(bs.directive_label(f"![[{self.ID} | note to self]]"), "note to self")
+        self.assertEqual(bs.directive_label(f"![[{self.ID} |]]"), None)
+        # A label can't hold ]], so this line is no directive at all.
+        self.assertEqual(bs.find_directives(f"![[{self.ID} | a]] b]]\n"), [])
+
+    def test_indented_code_is_inert(self):
+        # 0.4 (#102): where code is, is CommonMark's to say.
+        for body in (f"\t![[{self.ID}]]\n", f"Para.\n\n    ![[{self.ID}]]\n\nAfter.\n",
+                     f"Para.\n\n    see [[{self.ID}]]\n"):
+            self.assertEqual(bs.find_directives(body), [], body)
+            self.assertEqual(bs.find_links(body), [], body)
+        # Directly under a paragraph line, or as list content, it's live.
+        self.assertEqual(len(bs.find_directives(f"Para.\n    ![[{self.ID}]]\n")), 1)
+        self.assertEqual(bs.find_links(f"- item\n\n    see [[{self.ID}]]\n"), [self.ID])
 
     def test_inert_link_forms(self):
         body = (f"In code, `[[{self.ID}]]` and ``a [[{self.ID}]] b`` are text.\n\n"
@@ -664,6 +708,8 @@ class PartialAndLinkGrammarTests(unittest.TestCase):
         long = bs.link_text("word " * 30)
         self.assertTrue(long.endswith("\u2026") and len(long) <= bs.LINK_TEXT_CAP + 1, long)
         self.assertEqual(bs.link_text(""), "")
+        self.assertEqual(bs.link_text(f"See [[{self.ID} | that one]] [[{self.ID}]].\n"),
+                         "See that one .")
 
 
 class PartialAndLinkStampTests(StampHelpers):
@@ -683,10 +729,11 @@ class PartialAndLinkStampTests(StampHelpers):
                          (self.frag, 1, 1, "words"))
         self.assertEqual(t["content_md"], "Quoted words here.\n")
 
-    def test_a_selection_running_on_is_refused_at_stamp(self):
-        write_post(self.content_dir, "a.md", FM, f"![[{self.frag}]]\n> words\nmore\n")
-        with self.assertRaisesRegex(bs.BlygStampError, "blank line"):
-            self.stamp()
+    def test_a_lazy_selection_is_stamped_whole(self):
+        write_post(self.content_dir, "a.md", FM, f"![[{self.frag}]]\n> Quoted\nwords\n")
+        thread_id = self.stamp()[0].blyg_id
+        [t] = self.ledger()[thread_id]["transclusions"]
+        self.assertEqual(t["selection"], "Quoted words")
 
     def test_a_link_resolves_to_the_targets_page(self):
         write_post(self.content_dir, "a.md", FM, f"See [[{self.frag}]].\n")
@@ -708,16 +755,23 @@ class PartialAndLinkStampTests(StampHelpers):
         with self.assertRaisesRegex(bs.BlygStampError, "is withdrawn"):
             self.stamp()
 
-    def test_a_link_is_not_re_resolved_when_its_target_moves(self):
+    def test_a_link_is_not_re_resolved_when_its_target_changes(self):
         write_post(self.content_dir, "a.md", FM, f"See [[{self.frag}]].\n")
         item = self.stamp()[0].blyg_id
         before = self.ledger()[item]
-        self.edit("z-frag.md", 'blyg_kind = "fragment"', 'blyg_kind = "thread"')
+        self.edit("z-frag.md", "Quoted words", "Other words")
         self.stamp()
         self.assertEqual(self.ledger()[item], before)
         self.edit("a.md", "See", "See now")
         self.stamp()
-        self.assertEqual(self.ledger()[item]["links"][0]["page"], f"t/{self.frag}/")
+        self.assertEqual(self.ledger()[item]["links"][0]["text"], "Other words here.")
+
+    def test_a_label_names_nothing_in_the_ledger(self):
+        # Resolution ignores the label; the build renders it from content_md.
+        write_post(self.content_dir, "a.md", FM, f"See [[{self.frag} | mine]].\n")
+        item = self.stamp()[0].blyg_id
+        self.assertEqual(self.ledger()[item]["links"], [
+            {"id": self.frag, "page": f"f/{self.frag}/", "text": "Quoted words here."}])
 
     def test_a_quoted_sources_links_ride_in_its_snapshot(self):
         linker = self.first("y-frag.md", fm=self.FRAG, body=f"Links [[{self.frag}]].\n")
@@ -908,7 +962,7 @@ class TransclusionResolutionTests(StampHelpers):
 
     def test_directive_in_a_fragment_is_refused(self):
         write_post(self.content_dir, "b-frag.md", self.FRAG, f"![[{self.frag}]]\n")
-        with self.assertRaisesRegex(bs.BlygStampError, "only threads transclude"):
+        with self.assertRaisesRegex(bs.BlygStampError, "directive belongs to a thread"):
             self.stamp()
 
     def test_fenced_directive_stays_inert(self):
@@ -923,13 +977,11 @@ class TransclusionResolutionTests(StampHelpers):
         self.stamp()
         self.assertNotIn("transclusions", self.ledger()[thread_id])
 
-    def test_kind_change_to_fragment_drops_transclusions(self):
-        self.thread("a-thread.md", self.frag)
+    def test_a_labelled_directive_resolves_as_one_without(self):
+        self.thread("a-thread.md", extra=f"![[{self.frag} | the quote]]\n")
         thread_id = self.stamp()[0].blyg_id
-        self.edit("a-thread.md", "draft = false", 'draft = false\nblyg_kind = "fragment"')
-        self.edit("a-thread.md", f"![[{self.frag}]]\n", "")
-        self.stamp()
-        self.assertNotIn("transclusions", self.ledger()[thread_id])
+        [t] = self.ledger()[thread_id]["transclusions"]
+        self.assertEqual((t["id"], t["version"]), (self.frag, 1))
 
     def test_check_resolves_without_writing(self):
         self.thread("a-thread.md", self.frag)
@@ -1106,6 +1158,29 @@ class TransclusionResolutionTests(StampHelpers):
         self.assertEqual(plans["a-thread.md"].kind, "amend")
         self.assertEqual(self.ledger(), before)
 
+class TextTests(StampHelpers):
+    """0.4 §5.1 (decision #103): content_md is text."""
+
+    def test_c0_controls_are_refused(self):
+        write_post(self.content_dir, "p.md", FM, "A bell \x07 here.\n")
+        with self.assertRaisesRegex(bs.BlygStampError, "U\\+0007.*C0 control"):
+            self.stamp()
+
+    def test_tab_lf_and_cr_are_text(self):
+        write_post(self.content_dir, "p.md", FM, "Tab\there.\r\nCRLF.\n")
+        self.assertEqual(self.stamp()[0].kind, "new")
+
+    def test_not_nfc_publishes_with_a_warning(self):
+        write_post(self.content_dir, "p.md", FM, "Cafe\u0301.\n")
+        [plan] = self.stamp()
+        self.assertEqual(plan.kind, "new")
+        self.assertIn("Normalization Form C", plan.warning)
+
+    def test_noncharacters_warn(self):
+        write_post(self.content_dir, "p.md", FM, "A \uffff.\n")
+        self.assertIn("U+FFFF", self.stamp()[0].warning)
+
+
 class KindTests(StampHelpers):
     def test_kind_is_recorded(self):
         blyg_id = self.first(fm=FM + 'blyg_kind = "fragment"\n')
@@ -1113,15 +1188,26 @@ class KindTests(StampHelpers):
         self.assertEqual(entry["kind"], "fragment")
         self.assertEqual(entry["changelog"][0]["kind"], "fragment")
 
-    def test_kind_change_is_a_new_version(self):
+    def test_kind_is_fixed_at_first_publication(self):
+        # 0.4 §5.3 (decision #100).
         blyg_id = self.first()
         self.edit("post.md", "draft = false", 'draft = false\nblyg_kind = "fragment"')
-        plans = self.stamp()
-        self.assertEqual(plans[0].kind, "bump")
-        self.assertIn("thread -> fragment", plans[0].detail)
+        with self.assertRaisesRegex(bs.BlygStampError, "kind is fixed at its first publication"):
+            self.stamp()
+        self.assertEqual(self.ledger()[blyg_id]["version"], 1)
+
+    def test_an_unshipped_item_may_still_change_kind_under_amend(self):
+        blyg_id = self.first()
+        self.edit("post.md", "draft = false", 'draft = false\nblyg_kind = "fragment"')
+        [plan] = self.stamp(published={})
+        self.assertEqual(plan.kind, "amend")
         entry = self.ledger()[blyg_id]
-        self.assertEqual((entry["version"], entry["kind"]), (2, "fragment"))
-        self.assertEqual([c["kind"] for c in entry["changelog"]], ["thread", "fragment"])
+        self.assertEqual((entry["version"], entry["kind"]), (1, "fragment"))
+        # Once it has shipped, the shipped kind holds.
+        shipped = self.ledger()
+        self.edit("post.md", 'blyg_kind = "fragment"', 'blyg_kind = "thread"')
+        with self.assertRaisesRegex(bs.BlygStampError, "kind is fixed"):
+            self.stamp(published=shipped)
 
     def test_invalid_kind_is_refused(self):
         write_post(self.content_dir, "p.md", FM + 'blyg_kind = "withdrawn"\n', "x\n")
@@ -1134,16 +1220,18 @@ class KindTests(StampHelpers):
         self.stamp()
         self.assertEqual(self.ledger()[blyg_id]["changelog"][-1]["kind"], "withdrawn")
 
-    def test_kind_change_while_withdrawn_waits_for_return(self):
+    def test_returning_restores_the_kind_it_had(self):
         blyg_id = self.first()
         self.edit("post.md", "draft = false", "draft = false\nblyg_withdrawn = true")
         self.stamp()
         self.edit("post.md", "draft = false", 'draft = false\nblyg_kind = "fragment"')
-        self.assertEqual(self.stamp()[0].kind, "noop")
+        with self.assertRaisesRegex(bs.BlygStampError, "kind is fixed"):
+            self.stamp()
+        self.edit("post.md", 'blyg_kind = "fragment"\n', "")
         self.edit("post.md", "blyg_withdrawn = true\n", "")
         self.assertEqual(self.stamp()[0].kind, "return")
         entry = self.ledger()[blyg_id]
-        self.assertEqual((entry["version"], entry["kind"]), (3, "fragment"))
+        self.assertEqual((entry["version"], entry["kind"]), (3, "thread"))
 
     def test_ledger_without_kind_is_refused(self):
         blyg_id = self.first()
@@ -1300,8 +1388,11 @@ class GenMarkupTests(unittest.TestCase):
         self.refused("A {{% blyg-gen %}}b{{% /blyg-gen %}}\n", "malformed")
         self.refused("A {{< blyg-gen model=m >}}b" + CLOSE + "\n", "malformed")
 
-    def test_no_transclusion_inside_a_generated_block(self):
-        self.refused(f"{OPEN}\n![[{'0' * 26}]]\n{CLOSE}\n", "quotation, never generation")
+    def test_a_generated_block_may_carry_a_directive(self):
+        # 0.4 §5.7 (#102): the bake closes the wrapper around the quote.
+        [span] = self.parse(f"{OPEN}\nMine.\n\n![[{'0' * 26}]]\n{CLOSE}\n")
+        self.assertTrue(span.block)
+        self.refused(f"{OPEN}\n- a\n\n  ![[{'0' * 26}]]\n{CLOSE}\n", "unindent it")
 
 
 class GenerationTests(StampHelpers):

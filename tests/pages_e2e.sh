@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # End-to-end proof of §8.4 against real Hugo builds of a scratch copy of
 # exampleSite/, whose fragment has v1 pinned: the pinned page's content
-# stays byte-identical to the pin through an edit, a kind change and a
-# withdrawal (its chrome -- the links to the live page -- may follow the
-# item, §8.4 rule 2); the live page moves with the kind (leaving a
-# redirect) and cites only the pin; a withdrawn item's endcap still cites
-# it, with no version stepper; and a recorded pin whose file is gone
-# fails the build.
+# stays byte-identical to the pin through an edit and a withdrawal (its
+# chrome -- the links to the live page -- may follow the item, §8.4 rule
+# 2); the live page cites only the pin; a kind change is refused, by the
+# stamp and by the build (§5.3: a kind is fixed at first publication), so
+# the page never moves; a withdrawn item's endcap still cites its pin,
+# with no version stepper; and a recorded pin whose file is gone fails
+# the build.
 #
 # Run from anywhere, with GNU or BSD (macOS) sed and grep -- POSIX BRE/ERE
 # only, no GNU escapes; needs hugo, go and python3 on PATH. CI runs it.
@@ -64,31 +65,33 @@ frozen || fail "an edit changed the pinned page (§8.4 rule 2)"
 [ ! -e "public/blyg/f/$id/v2" ] || fail "an unpinned version got a page (§8.4 rule 1)"
 echo "ok: an edit leaves the pinned content unchanged"
 
-# 2. Kind change: the live page moves to t/, f/ redirects, the pin stays put.
+# 2. Kind change: refused (§5.3), by the stamp and, unstamped, by the build.
 sed -i.bak 's/^blyg_kind = "fragment"$/blyg_kind = "thread"/' "$md" && rm "$md.bak"
-stamp
+if python3 "$repo/scripts/blyg_stamp.py" >/dev/null 2>&1; then
+  fail "the stamp accepted a kind change"
+fi
+rm -rf public
+if hugo --minify --quiet >/dev/null 2>&1; then
+  fail "hugo built a kind the ledger doesn't have"
+fi
+sed -i.bak 's/^blyg_kind = "thread"$/blyg_kind = "fragment"/' "$md" && rm "$md.bak"
 build
-frozen || fail "a kind change changed the pinned page"
-[ "$(versions public/blyg/t/$id/index.html)" = "v3 · pinned: v1" ] \
-  || fail "live page didn't move to t/"
-grep -q "url=https://example.org/blyg/t/$id/" "public/blyg/f/$id/index.html" \
-  || fail "the old f/ permalink doesn't redirect to t/"
-grep -qE "rel=\"?canonical\"? href=\"?https://example.org/blyg/t/$id/" "$pinned" \
-  || fail "the pinned page isn't canonical to the moved live page"
-echo "ok: a kind change moves the live page and leaves a redirect"
+frozen || fail "a refused kind change changed the pinned page"
+[ ! -e "public/blyg/t/$id" ] || fail "a refused kind change moved the live page"
+echo "ok: a kind change is refused, and the live page stays put"
 
 # 3. Withdrawal: the live page says so, the pinned page survives (§8.4 rule 1).
-sed -i.bak '/^blyg_kind = "thread"$/a\
+sed -i.bak '/^blyg_kind = "fragment"$/a\
 blyg_withdrawn = true
 ' "$md" && rm "$md.bak"
 stamp
 build
 frozen || fail "withdrawal changed the pinned page"
-grep -q "This item was withdrawn" "public/blyg/t/$id/index.html" \
+grep -q "This item was withdrawn" "public/blyg/f/$id/index.html" \
   || fail "the live page doesn't say the item was withdrawn"
-[ "$(versions public/blyg/t/$id/index.html)" = "v4 · pinned: v1" ] \
+[ "$(versions public/blyg/f/$id/index.html)" = "v3 · pinned: v1" ] \
   || fail "the endcap doesn't still cite its pin"
-! grep -qE 'data-item|version-nav' "public/blyg/t/$id/index.html" \
+! grep -qE 'data-item|version-nav' "public/blyg/f/$id/index.html" \
   || fail "the version stepper would run on a withdrawn item's endcap"
 echo "ok: a withdrawn item keeps its pinned page"
 

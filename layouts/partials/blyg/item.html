@@ -1,5 +1,5 @@
 {{- /*
-  Builds one blyg item document (protocol-v0.3 §5) as a Hugo dict, via
+  Builds one blyg item document (protocol-v0.4 §5) as a Hugo dict, via
   Hugo's partial-return-value feature -- the caller does:
 
     {{ $doc := partial "blyg/item.html" (dict "page" $page "ledger" $entry "base" $base) }}
@@ -11,15 +11,16 @@
               are still fully available).
     ledger -- this item's entry from data/blyg/ledger.json (as written by
               scripts/blyg_stamp.py): {path, created, version, kind,
-              last_hash, withdrawn, changelog, transclusions?} -- the
-              last only on a thread with directives, see below.
+              last_hash, withdrawn, changelog, transclusions?, links?,
+              generated?} -- transclusions only on a thread with
+              directives, see below.
     base   -- the site's base URL, with or without a trailing slash.
 
-  `kind` comes from the ledger, never straight from front matter: a
-  kind change is a publish event (it changes the document, so it needs
-  a version bump, §5.2), and only scripts/blyg_stamp.py can record one.
-  The page's `blyg_kind` ("fragment" or "thread", default "thread") must
-  agree with the ledger or the build fails -- same for the body, whose
+  `kind` comes from the ledger, never straight from front matter: it is
+  fixed at the item's first publication (§5.3, 0.4), which
+  scripts/blyg_stamp.py enforces. The page's `blyg_kind` ("fragment" or
+  "thread", default "thread") must agree with the ledger or the build
+  fails -- same for the body, whose
   SHA-256 must match the ledger's `last_hash` -- so an unstamped edit can
   never ship as a same-version stealth edit (§13.3). "withdrawn" is a
   protocol state derived from the ledger, never an authored kind.
@@ -31,9 +32,11 @@
 {{- $entry := .ledger -}}
 {{- $base := strings.TrimSuffix "/" .base -}}
 {{- $origin := printf "%s/blyg/" $base -}}
-{{- /* The item's live permalink (§8.4): what "#..." anchors resolve
-       against (§5.2) and, origin-relative, its page (§5.8). */ -}}
+{{- /* The item's live permalink (§8.4), origin-relative its page (§5.8),
+       and what its "#..." anchors resolve against (§5.2) while the pages
+       are built -- else its item document (partials/blyg/anchor-base.html). */ -}}
 {{- $self := partial "blyg/permalink.html" (dict "id" $page.Params.blyg_id "kind" $entry.kind "base" $base) -}}
+{{- $anchors := partial "blyg/anchor-base.html" (dict "id" $page.Params.blyg_id "kind" $entry.kind "base" $base) -}}
 {{- $withdrawn := $entry.withdrawn -}}
 {{- $file := $page.File.Filename -}}
 
@@ -45,12 +48,13 @@
   {{- errorf "blyg: ledger entry %s has no kind -- rerun scripts/blyg_stamp.py" $page.Params.blyg_id -}}
 {{- end -}}
 {{- if and (not $withdrawn) (ne $authoredKind $entry.kind) -}}
-  {{- errorf "blyg: %s says blyg_kind %q but the ledger has %q -- a kind change is a new version; run scripts/blyg_stamp.py" $file $authoredKind $entry.kind -}}
+  {{- errorf "blyg: %s says blyg_kind %q but the ledger has %q -- an item's kind is fixed at its first publication (§5.3); set it back" $file $authoredKind $entry.kind -}}
 {{- end -}}
 
 {{- $contentMD := "" -}}
 {{- $contentHTML := "" -}}
 {{- $media := slice -}}
+{{- $links := slice -}}
 {{- if not $withdrawn -}}
   {{- /* The body minus its blyg-gen markers, which are authoring state (§5.7). */ -}}
   {{- $contentMD = partial "blyg/content-md.html" $page.RawContent -}}
@@ -59,17 +63,19 @@
     {{- errorf "blyg: %s body hashes to %s but the ledger says %s -- run scripts/blyg_stamp.py before building (shipping this would be a same-version stealth edit, §13.3)" $file $hash $entry.last_hash -}}
   {{- end -}}
   {{- /*
-    content_html (§5.2), with its transclusions baked (§10.2) and every
-    URL absolute -- an in-document "#..." anchor against the item's own
-    page, the same URL partials/blyg/permalink.html gives it whether or
-    not the site builds pages, so the bytes don't depend on that setting.
-    See partials/blyg/bake.html.
+    content_html (§5.2), with its transclusions baked (§10.2), its
+    [[id]] links rendered (§10.1) and every URL absolute -- an
+    in-document "#..." anchor against $anchors, any other relative URL
+    against the origin. See partials/blyg/bake.html, which also returns
+    the links it rendered: links[] (§10.3a).
   */ -}}
-  {{- $html := partial "blyg/bake.html" (dict
+  {{- $baked := partial "blyg/bake.html" (dict
       "page" $page "raw" $page.RawContent "html" $page.Content
       "snapshots" $entry.transclusions "links" $entry.links "hash" $entry.last_hash
-      "file" $file "base" $base "self" $self) -}}
+      "file" $file "base" $base "self" $anchors) -}}
+  {{- $html := $baked.html -}}
   {{- $contentHTML = $html -}}
+  {{- $links = $baked.links -}}
 
   {{- /*
     media (§5.4): every embedded object this version's HTML loads from
@@ -131,7 +137,7 @@
 {{- $lastEntry := index $changelog (sub (len $changelog) 1) -}}
 
 {{- $doc := dict
-  "blyg" "0.3"
+  "blyg" "0.4"
   "id" $page.Params.blyg_id
   "kind" $kind
   "origin" $origin
@@ -148,8 +154,9 @@
   §5.8: the item's permalink page, origin-relative -- only while this
   module writes the pages, since a page that 404s is worse than none.
   Keyed on the authored kind like the permalink itself, so a withdrawn
-  item keeps it (§9); a kind change moves it, and the old path
-  redirects (layouts/blyg/page.html).
+  item keeps it (§9). The kind is fixed (§5.3), so the page is stable
+  (§5.8); an item whose kind changed before 0.4 fixed it keeps a
+  redirect from its old path (content/blyg/_content.gotmpl).
 */ -}}
 {{- if partial "blyg/pages-enabled.html" $page -}}
   {{- $doc = merge $doc (dict "page" (strings.TrimPrefix $origin $self)) -}}
@@ -192,6 +199,12 @@
     {{- end -}}
     {{- $doc = merge $doc (dict "generated" $generated) -}}
   {{- end -}}
+{{- end -}}
+{{- /* §10.3a (0.4): one {id} per [[id]] link, in document order -- own-
+       origin, so no origin; omitted when there are none, and on an
+       endcap. */ -}}
+{{- with $links -}}
+  {{- $doc = merge $doc (dict "links" .) -}}
 {{- end -}}
 {{- if eq $entry.kind "thread" -}}
   {{- /* §10.3: {id, version, selector?} in directive order; [] for an endcap. */ -}}

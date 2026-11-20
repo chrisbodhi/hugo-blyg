@@ -4,8 +4,11 @@
 # requires every file under blyg/ other than the pages themselves and the
 # version stepper's script -- blyg.json, items/index.json, items/*.json,
 # the pins, blogroll.opml, media -- to be byte-identical, apart from the
-# two places the protocol names the page: each live item document's
-# "page" (§5.8), and each feed.xml entry's <link> (§7).
+# places the protocol names the page: each live item document's "page"
+# (§5.8), each feed.xml entry's <link> (§7), and, inside content_html,
+# an [[id]] link's href or an in-document anchor's base, which name the
+# item's page with pages on and its item document with them off (§10.1,
+# 0.4: a guessed permalink is never baked into published bytes).
 #
 # Run from anywhere; needs hugo, go and python3 on PATH. CI runs it.
 set -euo pipefail
@@ -42,12 +45,25 @@ def unpaged(doc):
     """An item document without its "page" (sorted after "origin")."""
     return re.sub(rb',"page":"[^"]*"', b"", doc)
 
+# An item's page (pages on) or its item document (pages off), as an href
+# inside content_html names it -- JSON-escaped in an item document.
+ITEM_URL = re.compile(rb"https://example\.org/blyg/(?:[ft]/([0-9a-z]{26})/|items/([0-9a-z]{26})\.json)")
+
+def unnamed(data):
+    return ITEM_URL.sub(lambda m: b"ITEM:" + (m.group(1) or m.group(2)), data)
+
 problems = []
 have, want = surfaces(on), surfaces(off)
 for name in sorted(have ^ want):
     problems.append(f"{name}: only built with pages {'on' if name in have else 'off'}")
 for name in sorted(have & want):
     a, b = (on / name).read_bytes(), (off / name).read_bytes()
+    if PAGE_FIELD.match(name):
+        a = re.sub(rb'"content_html":"(?:[^"\\]|\\.)*"', lambda m: unnamed(m.group(0)), a)
+        b = re.sub(rb'"content_html":"(?:[^"\\]|\\.)*"', lambda m: unnamed(m.group(0)), b)
+    elif name == "feed.xml":
+        a = re.sub(rb"<description>.*?</description>", lambda m: unnamed(m.group(0)), a, flags=re.S)
+        b = re.sub(rb"<description>.*?</description>", lambda m: unnamed(m.group(0)), b, flags=re.S)
     if name == "feed.xml":
         if unlinked(a) != unlinked(b):
             problems.append("feed.xml: differs by more than its entries' <link>s")
@@ -67,5 +83,6 @@ if problems:
 for name in ("blyg.json", "items/index.json", "feed.xml"):
     assert name in have, name
 print(f"ok: {len(have)} surface files are the same with pages on and off "
-      f"(item documents apart from \"page\", feed.xml from its entries' <link>s)")
+      f"(item documents apart from \"page\", feed.xml from its entries' <link>s, "
+      f"and hrefs naming an item's page or document)")
 PY
